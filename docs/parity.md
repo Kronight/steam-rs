@@ -11,7 +11,7 @@ Steam's website" still works; it just isn't native yet.
 | --- | ---: | --- |
 | Sign-in and accounts | 0.75 | Changing email, password or phone opens Steam's website |
 | Offline mode and reconnecting | 1 | Whether Steam counts playtime recorded offline is unconfirmed |
-| Library | 0.75 | Collection edits aren't saved back to Steam; dynamic collections are skipped |
+| Library | 0.75 | Dynamic collections (built from filters) are skipped |
 | Downloads and installs | 0.75 | No drag to reorder the queue; no taskbar progress |
 | Store | 0.75 | Checkout happens on Steam's website (Steam requires it); no discovery queue; can't write reviews |
 | Friends and chat | 0.75 | No group chats or voice chat |
@@ -62,7 +62,7 @@ Steam's website" still works; it just isn't native yet.
 | Which systems a game runs on: a **Runs on** filter, a game-page line, and "Not available on macOS" for Windows-only games on a Mac | Done |
 | Search, filters (genre, features, Steam Deck status, installed, played), sort by name, recent, hours, size | Done |
 | Home with recent games and shelves, game page with art, play bar, news and achievements | Done |
-| Collections, including your Steam Favorites and Hidden | Read from Steam. Edits stay local for now |
+| Collections, including your Steam Favorites and Hidden | Done, in step with Steam both ways. Edits made before Steam answers (or offline) are kept and sent once it does |
 | Non-Steam games | Done |
 | Install states everywhere: list row with progress, game page, right-click menu, Properties | Done |
 | Properties: general, launch options, language, updates, installed files, versions and betas (with private beta codes), DLC, Steam Cloud, Workshop, controller, privacy | Done |
