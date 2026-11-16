@@ -176,6 +176,10 @@ impl Overlay {
     pub fn game_stopped(&mut self) {
         self.game = None;
         self.ingame = None;
+        if self.open {
+            #[cfg(target_os = "macos")]
+            mac::set_accessory(false);
+        }
         self.open = false;
         for w in &mut self.wins {
             w.pinned = false;
@@ -192,6 +196,10 @@ impl Overlay {
         if self.open {
             self.close();
         } else {
+            // macOS only lets an accessory app (no Dock icon) put windows on
+            // another app's full-screen space, where games run.
+            #[cfg(target_os = "macos")]
+            mac::set_accessory(true);
             self.open = true;
             self.focused = false;
             self.game_window = foreground_window();
@@ -200,6 +208,8 @@ impl Overlay {
 
     fn close(&mut self) {
         self.open = false;
+        #[cfg(target_os = "macos")]
+        mac::set_accessory(false);
         // Give the keyboard back to the game.
         give_focus(self.game_window);
     }
@@ -224,9 +234,137 @@ impl Overlay {
 fn foreground_window() -> isize {
     unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() as isize }
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn foreground_window() -> isize {
     0
+}
+
+/// macOS: the app in front, as its process id.
+#[cfg(target_os = "macos")]
+fn foreground_window() -> isize {
+    mac::frontmost().map_or(0, |(pid, _)| pid as isize)
+}
+
+/// macOS: which app is in front, and bringing one back (NSWorkspace).
+#[cfg(target_os = "macos")]
+mod mac {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::{Encode, Encoding};
+    use std::ffi::{CStr, c_char};
+
+    /// NSRect / CGRect.
+    #[repr(C)]
+    #[derive(Clone, Copy, PartialEq)]
+    struct Rect {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    }
+
+    /// NSEdgeInsets (top, left, bottom, right).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Insets {
+        top: f64,
+        left: f64,
+        bottom: f64,
+        right: f64,
+    }
+
+    unsafe impl Encode for Insets {
+        const ENCODING: Encoding = Encoding::Struct("NSEdgeInsets", &[f64::ENCODING, f64::ENCODING, f64::ENCODING, f64::ENCODING]);
+    }
+
+    unsafe impl Encode for Rect {
+        const ENCODING: Encoding = Encoding::Struct("CGRect", &[Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]), Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING])]);
+    }
+
+    /// The frontmost app: (process id, its program's path).
+    pub fn frontmost() -> Option<(i32, String)> {
+        unsafe {
+            let ws: *mut AnyObject = msg_send![AnyClass::get(c"NSWorkspace")?, sharedWorkspace];
+            let app: *mut AnyObject = msg_send![ws, frontmostApplication];
+            if app.is_null() {
+                return None;
+            }
+            let pid: i32 = msg_send![app, processIdentifier];
+            let url: *mut AnyObject = msg_send![app, executableURL];
+            let path: *mut AnyObject = if url.is_null() { std::ptr::null_mut() } else { msg_send![url, path] };
+            let s: *const c_char = if path.is_null() { std::ptr::null() } else { msg_send![path, UTF8String] };
+            Some((pid, if s.is_null() { String::new() } else { CStr::from_ptr(s).to_string_lossy().into_owned() }))
+        }
+    }
+
+    /// Let our window titled `title` show on other apps' full-screen spaces
+    /// (games), above them.
+    pub fn over_fullscreen(title: &str) {
+        // NSWindowCollectionBehaviorCanJoinAllSpaces | FullScreenAuxiliary.
+        const BEHAVIOR: usize = (1 << 0) | (1 << 8);
+        // NSStatusWindowLevel: above full-screen apps.
+        const LEVEL: isize = 25;
+        unsafe {
+            let Some(cls) = AnyClass::get(c"NSApplication") else { return };
+            let app: *mut AnyObject = msg_send![cls, sharedApplication];
+            let windows: *mut AnyObject = msg_send![app, windows];
+            let n: usize = msg_send![windows, count];
+            for i in 0..n {
+                let w: *mut AnyObject = msg_send![windows, objectAtIndex: i];
+                let t: *mut AnyObject = msg_send![w, title];
+                let s: *const c_char = if t.is_null() { std::ptr::null() } else { msg_send![t, UTF8String] };
+                if s.is_null() || CStr::from_ptr(s).to_bytes() != title.as_bytes() {
+                    continue;
+                }
+                let b: usize = msg_send![w, collectionBehavior];
+                if b & BEHAVIOR != BEHAVIOR {
+                    let _: () = msg_send![w, setCollectionBehavior: b | BEHAVIOR];
+                    let _: () = msg_send![w, setLevel: LEVEL];
+                }
+                // The whole screen (a full-screen space has no menu bar to
+                // stay under), minus the strip beside the camera notch.
+                let screen: *mut AnyObject = msg_send![w, screen];
+                if !screen.is_null() {
+                    let mut full: Rect = msg_send![screen, frame];
+                    let has_insets: bool = msg_send![screen, respondsToSelector: objc2::sel!(safeAreaInsets)];
+                    if has_insets {
+                        let inset: Insets = msg_send![screen, safeAreaInsets];
+                        full.h -= inset.top.max(0.0);
+                    }
+                    let now: Rect = msg_send![w, frame];
+                    if now != full {
+                        let _: () = msg_send![w, setFrame: full, display: true];
+                    }
+                }
+                // Onto the space in front (the game's), not the one it was made on.
+                let visible: bool = msg_send![w, isOnActiveSpace];
+                if !visible {
+                    let _: () = msg_send![w, orderFrontRegardless];
+                }
+            }
+        }
+    }
+
+    /// Accessory (no Dock icon, may join full-screen spaces) or a normal app.
+    pub fn set_accessory(on: bool) {
+        unsafe {
+            let Some(cls) = AnyClass::get(c"NSApplication") else { return };
+            let app: *mut AnyObject = msg_send![cls, sharedApplication];
+            // NSApplicationActivationPolicyRegular = 0, Accessory = 1
+            let _: bool = msg_send![app, setActivationPolicy: if on { 1isize } else { 0isize }];
+        }
+    }
+
+    pub fn activate(pid: i32) {
+        unsafe {
+            let Some(cls) = AnyClass::get(c"NSRunningApplication") else { return };
+            let app: *mut AnyObject = msg_send![cls, runningApplicationWithProcessIdentifier: pid];
+            if !app.is_null() {
+                // NSApplicationActivateIgnoringOtherApps
+                let _: bool = msg_send![app, activateWithOptions: 2usize];
+            }
+        }
+    }
 }
 
 /// The focused window belongs to a program inside `dir` (the game's folder).
@@ -261,9 +399,15 @@ fn foreground_is_in(dir: &std::path::Path) -> bool {
         exe.starts_with(dir.trim_end_matches('\\'))
     }
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn foreground_is_in(_: &std::path::Path) -> bool {
     false
+}
+
+/// macOS: the app in front runs from inside `dir` (the game's folder).
+#[cfg(target_os = "macos")]
+fn foreground_is_in(dir: &std::path::Path) -> bool {
+    mac::frontmost().is_some_and(|(pid, exe)| pid as u32 != std::process::id() && !exe.is_empty() && std::path::Path::new(&exe).starts_with(dir))
 }
 
 #[cfg(windows)]
@@ -272,7 +416,13 @@ fn give_focus(window: isize) {
         unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(window as _) };
     }
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn give_focus(window: isize) {
+    if window > 0 {
+        mac::activate(window as i32);
+    }
+}
+#[cfg(not(any(windows, target_os = "macos")))]
 fn give_focus(_: isize) {}
 
 /// Pick up games that draw the overlay themselves and read what they sent.
@@ -447,7 +597,13 @@ pub fn show(app: &mut SteamApp, ctx: &egui::Context, actions: &mut Vec<Action>) 
         .with_mouse_passthrough(!active)
         .with_taskbar(false);
     let opened_now = active && !app.overlay.focused;
+    if !app.can_open_window(ctx, viewport) {
+        return;
+    }
     ctx.show_viewport_immediate(viewport, builder, |ui, _class| {
+        // macOS: full-screen games sit on their own space; the overlay joins it.
+        #[cfg(target_os = "macos")]
+        mac::over_fullscreen("SteamInRust Overlay");
         // Pinned windows over the game let clicks through; the open overlay takes them.
         if app.overlay.passthrough != Some(!active) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::MousePassthrough(!active));
@@ -498,8 +654,24 @@ fn clock() -> String {
     }
     #[cfg(not(windows))]
     {
-        let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) % 86_400;
-        format!("{:02}:{:02}", s / 3600, (s / 60) % 60)
+        // struct tm, as far as hour and minute (the C library fills the rest).
+        #[repr(C)]
+        struct Tm {
+            sec: i32,
+            min: i32,
+            hour: i32,
+            rest: [i64; 8],
+        }
+        unsafe extern "C" {
+            fn localtime_r(t: *const i64, out: *mut Tm) -> *mut Tm;
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let mut tm = Tm { sec: 0, min: 0, hour: 0, rest: [0; 8] };
+        if unsafe { localtime_r(&now, &mut tm) }.is_null() {
+            let s = now % 86_400;
+            return format!("{:02}:{:02}", s / 3600, (s / 60) % 60);
+        }
+        format!("{:02}:{:02}", tm.hour, tm.min)
     }
 }
 

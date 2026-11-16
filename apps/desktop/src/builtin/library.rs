@@ -64,13 +64,18 @@ struct AdvFilters {
     genres: BTreeSet<u32>,
     features: BTreeSet<u32>,
     deck: BTreeSet<u8>,
+    /// Systems the game has a version for ("windows", "macos", "linux").
+    systems: BTreeSet<&'static str>,
 }
 
 impl AdvFilters {
     fn count(&self) -> usize {
-        self.play.len() + self.kinds.len() + self.genres.len() + self.features.len() + self.deck.len()
+        self.play.len() + self.kinds.len() + self.genres.len() + self.features.len() + self.deck.len() + self.systems.len()
     }
 }
+
+/// The three systems Steam ships games for, with the names players know.
+const SYSTEMS: [&str; 3] = ["windows", "macos", "linux"];
 
 const GENRES: &[(u32, &str)] = &[
     (1, "Action"), (25, "Adventure"), (4, "Casual"), (23, "Indie"), (29, "Massively Multiplayer"), (9, "Racing"),
@@ -696,6 +701,9 @@ impl Library {
             MenuAct::PauseDownload => ctx.send(Command::PauseDownload { app_id: id }),
             MenuAct::ResumeDownload => ctx.send(Command::ResumeDownload { app_id: id }),
             MenuAct::CancelDownload => ctx.send(Command::CancelDownload { app_id: id }),
+            MenuAct::Install if ctx.state.apps.as_ref().and_then(|a| a.get(&id)).is_some_and(|o| !o.runs_on_this_os()) => {
+                ctx.toast(t!("This game doesn't run on {os}.", os = client::download::os_name(model::THIS_OS)));
+            }
             MenuAct::Install => self.install_dialog = Some(InstallDialog::new(id, ctx)),
             MenuAct::Favorite => {
                 if !self.favorites.remove(&id) {
@@ -832,7 +840,9 @@ impl Library {
         let genre_ok = f.genres.is_empty() || o.is_some_and(|o| o.genres.iter().any(|g| f.genres.contains(g)));
         let feature_ok = f.features.is_empty() || o.is_some_and(|o| f.features.iter().all(|c| o.categories.contains(c)));
         let deck_ok = f.deck.is_empty() || f.deck.contains(&o.map(|o| o.deck).unwrap_or(0));
-        play_ok && kind_ok && genre_ok && feature_ok && deck_ok
+        // Installed games with no app info yet count as runnable here.
+        let system_ok = f.systems.is_empty() || f.systems.iter().any(|os| o.map_or(*os == model::THIS_OS && e.installed.is_some(), |o| o.runs_on(os)));
+        play_ok && kind_ok && genre_ok && feature_ok && deck_ok && system_ok
     }
 
     /// The filter popup, like Steam's library filters.
@@ -898,6 +908,13 @@ impl Library {
                     f.features.insert(c);
                 }
             }
+            group(ui, t!("Runs on"));
+            if let Some(i) = check_grid(ui, t, "f-system", 3, SYSTEMS.iter().map(|os| (f.systems.contains(os), client::download::os_name(os).to_string()))) {
+                let os = SYSTEMS[i];
+                if !f.systems.remove(os) {
+                    f.systems.insert(os);
+                }
+            }
             group(ui, t!("Steam Deck"));
             let deck = [(3u8, t!("Verified")), (2, t!("Playable")), (1, t!("Unsupported")), (0, t!("Unknown"))];
             if let Some(i) = check_grid(ui, t, "f-deck", 4, deck.iter().map(|(v, l)| (f.deck.contains(v), l.to_string()))) {
@@ -929,6 +946,19 @@ impl Library {
             for (f, label) in [(Filter::All, t!("All")), (Filter::Installed, t!("Installed")), (Filter::Favorites, icons::STAR), (Filter::Playing, t!("Played"))] {
                 if w::chip(ui, t, label, self.filter == f).clicked() {
                     self.filter = f;
+                }
+            }
+            // Off Windows many games have no version for this system: one
+            // click shows only the ones that run here.
+            if model::THIS_OS != "windows" {
+                let os = model::THIS_OS;
+                let on = self.adv.systems.len() == 1 && self.adv.systems.contains(os);
+                let chip = w::chip(ui, t, client::download::os_name(os), on).on_hover_text(t!("Only games that run on {os}", os = client::download::os_name(os)));
+                if chip.clicked() {
+                    self.adv.systems.clear();
+                    if !on {
+                        self.adv.systems.insert(os);
+                    }
                 }
             }
             // Steam-style filters in a popup.
@@ -1329,6 +1359,17 @@ impl Library {
                                     self.queue_install(ctx, id, Some(g.library.clone()));
                                 }
                             }
+                            // Like Steam: Workshop items the game needs download before it starts.
+                            Some(_) if ctx.state.workshop_preparing.contains_key(&id) => {
+                                let (done, total, title) = ctx.state.workshop_preparing[&id].clone();
+                                ui.add_enabled_ui(false, |ui| w::button(ui, t, Some(icons::DOWNLOAD), t!("Preparing to play"), w::Kind::Play, w::Size::Lg));
+                                ui.add_space(12.0);
+                                ui.vertical(|ui| {
+                                    ui.label(w::text_semibold(t!("Updating Workshop items: {done} of {total}", done = done + 1, total = total), 13.0, t.text));
+                                    w::progress(ui, t, done as f32 / total.max(1) as f32, 260.0);
+                                    ui.label(w::text(&title, 12.0, t.text_faint));
+                                });
+                            }
                             Some(_) if ctx.state.cloud_syncing.contains(&id) => {
                                 // Like Steam: the game starts once its saves are in sync.
                                 ui.add_enabled_ui(false, |ui| w::button(ui, t, Some(icons::CLOUD_CHECK), t!("Syncing Steam Cloud…"), w::Kind::Play, w::Size::Lg));
@@ -1339,6 +1380,13 @@ impl Library {
                                 if r.clicked() {
                                     self.launch_game(ctx, id, g.install_dir.clone());
                                 }
+                            }
+                            // Like Steam on a Mac: Windows-only games stay listed but can't be installed.
+                            None if owned.as_ref().is_some_and(|o| !o.runs_on_this_os()) => {
+                                let os = client::download::os_name(model::THIS_OS);
+                                ui.add_enabled_ui(false, |ui| w::button(ui, t, Some(icons::DOWNLOAD), &t!("Not available on {os}", os = os), w::Kind::Primary, w::Size::Lg))
+                                    .response
+                                    .on_disabled_hover_text(t!("This game doesn't run on {os}.", os = os));
                             }
                             None if owned.is_some() => {
                                 if w::button(ui, t, Some(icons::DOWNLOAD), t!("Install"), w::Kind::Primary, w::Size::Lg).clicked() {
@@ -1357,7 +1405,12 @@ impl Library {
                             ui.add_space(20.0);
                             crate::offline_ui::playtime_stat(ui, t, ctx.state, id, g.playtime_minutes);
                             ui.add_space(20.0);
-                            w::stat(ui, t, t!("Size"), &ui::bytes(g.size_on_disk));
+                            // Like Steam: the game and its Workshop items together.
+                            let workshop = local::manage::workshop_size(g);
+                            let size = ui.scope(|ui| w::stat(ui, t, t!("Size"), &ui::bytes(g.size_on_disk + workshop))).response;
+                            if workshop > 0 {
+                                size.on_hover_text(t!("{game} game + {workshop} Workshop items", game = ui::bytes(g.size_on_disk), workshop = ui::bytes(workshop)));
+                            }
                             // Where the game's Steam features come from (see docs/steam-compatibility.md).
                             if let Some(o) = &owned {
                                 let (mode, why) = match client::launch_mode_cached(o, &g.install_dir) {
@@ -1369,10 +1422,15 @@ impl Library {
                                 ui.scope(|ui| w::stat(ui, t, t!("Steam features"), mode)).response.on_hover_text(why);
                             }
                         } else if let Some(o) = &owned {
-                            let size: u64 = o.depots.iter().filter(|d| d.dlc_app.is_none() && (d.os.is_empty() || d.os.contains("windows"))).filter_map(|d| d.manifest("public").map(|m| m.1)).sum();
+                            let size: u64 = o.depots.iter().filter(|d| d.dlc_app.is_none() && model::os_matches(&d.os, model::THIS_OS)).filter_map(|d| d.manifest("public").map(|m| m.1)).sum();
                             if size > 0 {
                                 w::stat(ui, t, t!("Download size"), &format!("≈ {}", ui::bytes(size)));
+                                ui.add_space(20.0);
                             }
+                        }
+                        // Which systems it has versions for, and whether this one is among them.
+                        if let Some(o) = &owned {
+                            system_stat(ui, t, o);
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1912,8 +1970,12 @@ impl Library {
             ui.label(w::text(icons::TRASH, 28.0, t.danger));
             ui.label(w::text_bold(t!("Uninstall {name}?", name = name), 20.0, t.text));
             ui.add_space(4.0);
-            ui.add(egui::Label::new(w::text(t!("This deletes {size} from:", size = ui::bytes(g.size_on_disk)), 14.0, t.text_dim)).wrap());
+            let workshop = local::manage::workshop_size(g);
+            ui.add(egui::Label::new(w::text(t!("This deletes {size} from:", size = ui::bytes(g.size_on_disk + workshop)), 14.0, t.text_dim)).wrap());
             ui.label(w::text(g.install_dir.display().to_string(), 13.0, t.text).monospace());
+            if workshop > 0 {
+                ui.add(egui::Label::new(w::text(t!("Its Workshop items ({size}) are removed too.", size = ui::bytes(workshop)), 12.5, t.text_dim)).wrap());
+            }
             ui.add_space(4.0);
             ui.add(egui::Label::new(w::text(t!("Saves kept inside the game folder are deleted too. Steam Cloud saves aren't affected."), 12.5, t.text_faint)).wrap());
             if running {
@@ -2009,6 +2071,23 @@ fn check_grid(ui: &mut Ui, t: &Theme, id: &str, cols: usize, items: impl Iterato
     hit
 }
 
+/// "Runs on: Windows · macOS", with how it runs here in the tooltip.
+fn system_stat(ui: &mut Ui, t: &Theme, o: &model::OwnedApp) {
+    let systems = o.systems();
+    if systems.is_empty() {
+        return;
+    }
+    let here = client::download::os_name(model::THIS_OS);
+    let names: Vec<&str> = systems.iter().map(|s| client::download::os_name(s)).collect();
+    let why = if o.runs_on_this_os() {
+        t!("Has a version made for {os}: it runs here as it is.", os = here).to_string()
+    } else {
+        t!("Made for {list} only: it doesn't run on {os}.", list = names.join(", "), os = here).to_string()
+    };
+    ui.add_space(20.0);
+    ui.scope(|ui| w::stat(ui, t, t!("Runs on"), &names.join(" · "))).response.on_hover_text(why);
+}
+
 fn fs4_free(path: &std::path::Path) -> Option<u64> {
     fs4::available_space(path).ok()
 }
@@ -2025,8 +2104,13 @@ impl InstallDialog {
     pub(crate) fn new(app: AppId, ctx: &Ctx) -> Self {
         let mut libraries = ctx.local.libraries.clone();
         if libraries.is_empty() {
-            let default = client::store::config_dir().join("Library");
-            let _ = std::fs::create_dir_all(default.join("steamapps"));
+            // No Steam here: offer Steam's usual folder, like its installer
+            // would use (our own folder if that one can't be written).
+            let fallback = client::store::config_dir().join("Library");
+            let default = local::default_steam_root().filter(|d| std::fs::create_dir_all(d.join("steamapps")).is_ok()).unwrap_or_else(|| {
+                let _ = std::fs::create_dir_all(fallback.join("steamapps"));
+                fallback
+            });
             libraries.push(default);
         }
         let size = ctx
@@ -2034,7 +2118,7 @@ impl InstallDialog {
             .apps
             .as_ref()
             .and_then(|a| a.get(&app))
-            .map(|o| o.depots.iter().filter(|d| d.dlc_app.is_none() && !d.shared_install && (d.os.is_empty() || d.os.contains("windows"))).filter_map(|d| d.manifest("public").map(|m| m.1)).sum())
+            .map(|o| o.depots.iter().filter(|d| d.dlc_app.is_none() && !d.shared_install && model::os_matches(&d.os, model::THIS_OS)).filter_map(|d| d.manifest("public").map(|m| m.1)).sum())
             .unwrap_or(0);
         // Pick the library with the most free space.
         let library = libraries.iter().max_by_key(|l| fs4_free(l).unwrap_or(0)).cloned().unwrap_or_default();

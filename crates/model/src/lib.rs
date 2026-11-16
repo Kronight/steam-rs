@@ -118,6 +118,10 @@ pub struct OwnedApp {
     /// Steam Deck: 0 unknown, 1 unsupported, 2 playable, 3 verified.
     #[serde(default)]
     pub deck: u8,
+    /// Systems the game runs on (`common/oslist`, e.g. "windows,macos");
+    /// empty when app info doesn't say.
+    #[serde(default)]
+    pub os_list: String,
 }
 
 /// A game's Steam Cloud setup, from its app info (`ufs`).
@@ -329,6 +333,31 @@ impl OwnedApp {
     pub fn is_dlc(&self) -> bool {
         self.kind == "dlc"
     }
+
+    /// Can it be installed and played on this computer's system? Like
+    /// Steam: from the app's own system list, else its launch options;
+    /// unknown counts as yes.
+    pub fn runs_on_this_os(&self) -> bool {
+        self.runs_on(THIS_OS)
+    }
+
+    /// Does it have a version for `os` ("windows", "macos", "linux")?
+    pub fn runs_on(&self, os: &str) -> bool {
+        if !self.os_list.trim().is_empty() {
+            return os_matches(&self.os_list, os);
+        }
+        let launch: Vec<&LaunchOption> = self.launch.iter().filter(|o| !o.executable.is_empty()).collect();
+        launch.is_empty() || launch.iter().any(|o| os_matches(&o.os_list, os))
+    }
+
+    /// The systems it has versions for, in Steam's order (empty: unknown).
+    pub fn systems(&self) -> Vec<&'static str> {
+        let known = !self.os_list.trim().is_empty() || self.launch.iter().any(|o| !o.os_list.trim().is_empty());
+        if !known {
+            return Vec::new();
+        }
+        ["windows", "macos", "linux"].into_iter().filter(|os| self.runs_on(os)).collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,14 +372,7 @@ pub struct LaunchOption {
 
 impl LaunchOption {
     pub fn runs_on_this_os(&self) -> bool {
-        let os = if cfg!(windows) {
-            "windows"
-        } else if cfg!(target_os = "macos") {
-            "macos"
-        } else {
-            "linux"
-        };
-        self.os_list.is_empty() || self.os_list.split(',').any(|o| o.trim() == os)
+        os_matches(&self.os_list, THIS_OS)
     }
 }
 
@@ -1471,5 +1493,39 @@ pub mod art {
             .filter(|h| !h.is_empty() && !h.chars().all(|c| c == '0'))
             .unwrap_or(DEFAULT_AVATAR);
         format!("https://avatars.steamstatic.com/{h}_medium.jpg")
+    }
+}
+
+/// This computer's system, as Steam names it in `oslist` ("windows",
+/// "macos", "linux").
+pub const THIS_OS: &str = if cfg!(windows) {
+    "windows"
+} else if cfg!(target_os = "macos") {
+    "macos"
+} else {
+    "linux"
+};
+
+/// Does a Steam `oslist` ("windows,macos"; empty = every system) include `os`?
+pub fn os_matches(os_list: &str, os: &str) -> bool {
+    os_list.trim().is_empty() || os_list.split(',').any(|o| o.trim().eq_ignore_ascii_case(os))
+}
+
+#[cfg(test)]
+mod os_tests {
+    use super::*;
+
+    #[test]
+    fn system_lists() {
+        assert!(os_matches("", "macos"));
+        assert!(os_matches("windows, macos", "macos"));
+        assert!(!os_matches("windows", "macos"));
+        let launch = |os: &str| LaunchOption { executable: "game".into(), arguments: String::new(), working_dir: String::new(), description: String::new(), os_list: os.into() };
+        let app = |os: &str, l: Vec<LaunchOption>| OwnedApp { os_list: os.into(), launch: l, ..Default::default() };
+        // The app's own list wins.
+        assert_eq!(app("windows,macos", vec![]).runs_on_this_os(), os_matches("windows,macos", THIS_OS));
+        // Else its launch options; nothing known counts as yes.
+        assert_eq!(app("", vec![launch("windows")]).runs_on_this_os(), THIS_OS == "windows");
+        assert!(app("", vec![]).runs_on_this_os());
     }
 }

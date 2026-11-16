@@ -128,6 +128,9 @@ pub struct SteamApp {
     pub launch_popup: Option<crate::launch_popup::LaunchPopup>,
     /// Links waiting for sign-in to finish.
     pending_links: Vec<String>,
+    /// Started by a game shortcut: once signed in, only the "Launching…"
+    /// window shows, like Steam (the library stays in the Dock / tray).
+    launch_only: bool,
     /// Main window is hidden in the tray.
     hidden: bool,
     applied_theme: Option<Theme>,
@@ -246,6 +249,7 @@ impl SteamApp {
             friends_window: Default::default(),
             links: crate::links::listen(cc.egui_ctx.clone()),
             launch_popup: None,
+            launch_only: link.as_deref().is_some_and(|l| matches!(crate::links::parse(l), Some(crate::links::Link::Run(_)))),
             pending_links: link.into_iter().collect(),
             hidden: false,
             applied_theme: None,
@@ -450,7 +454,22 @@ impl SteamApp {
 }
 
 impl SteamApp {
-    fn show_window(&mut self, ctx: &egui::Context) {
+    /// May a window that doesn't exist yet open now? eframe can't create
+    /// one while the main window is hidden (it then paints outside the
+    /// event loop and gives up), so this brings the main window back first;
+    /// the other window opens on the next frame.
+    pub(crate) fn can_open_window(&mut self, ctx: &egui::Context, id: egui::ViewportId) -> bool {
+        if !self.hidden || ctx.input(|i| i.raw.viewports.contains_key(&id)) {
+            return true;
+        }
+        // Shown but not focused, so macOS stays on the game's space.
+        self.hidden = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.request_repaint();
+        false
+    }
+
+    pub(crate) fn show_window(&mut self, ctx: &egui::Context) {
         self.hidden = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -460,11 +479,18 @@ impl SteamApp {
     fn handle_links(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         use crate::links::Link;
         while let Ok(l) = self.links.try_recv() {
-            self.show_window(ctx);
+            // Starting a game only needs the small "Launching…" window.
+            if !matches!(crate::links::parse(&l), Some(Link::Run(_))) {
+                self.show_window(ctx);
+            }
             self.pending_links.push(l);
         }
         if self.state.phase != Phase::LoggedIn {
             return;
+        }
+        if std::mem::take(&mut self.launch_only) && !self.hidden {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.hidden = true;
         }
         for raw in std::mem::take(&mut self.pending_links) {
             let nav = |page: &str, arg: Option<String>| Action::Navigate { page: page.into(), arg };
@@ -711,6 +737,8 @@ impl eframe::App for SteamApp {
             crate::overlay::show(self, &ctx, &mut actions);
             crate::launch_popup::show(self, &ctx);
             crate::tray::show(self, &ctx);
+            #[cfg(target_os = "macos")]
+            crate::mac_permissions::show(&ctx, &self.prefs.theme);
         } else {
             crate::login::show(self, ui);
             crate::tray::show(self, &ctx);

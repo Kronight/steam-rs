@@ -16,7 +16,9 @@ use crate::protocol::{Reply, Request};
 use crate::state::{Bytes, lock};
 use crate::vt::Fp;
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void};
+use std::ffi::c_char;
+#[cfg(windows)]
+use std::ffi::c_void;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -39,10 +41,10 @@ pub fn imp(name: &str) -> Option<Fp> {
         "DeactivateAllActionSetLayers" => f!(deactivate_layers),
         "GetActiveActionSetLayers" => f!(active_layers),
         "GetDigitalActionHandle" => f!(digital_handle),
-        "GetDigitalActionData" => f!(digital_data),
+        "GetDigitalActionData" => f!(ret::digital_data),
         "GetDigitalActionOrigins" => f!(digital_origins),
         "GetAnalogActionHandle" => f!(analog_handle),
-        "GetAnalogActionData" => f!(analog_data),
+        "GetAnalogActionData" => f!(ret::analog_data),
         "GetAnalogActionOrigins" => f!(analog_origins),
         "GetStringForDigitalActionName" | "GetStringForAnalogActionName" => f!(action_name),
         "GetStringForActionOrigin" => f!(origin_name),
@@ -79,12 +81,18 @@ struct Pad {
 type GetState = unsafe extern "system" fn(u32, *mut Pad) -> u32;
 type SetState = unsafe extern "system" fn(u32, *mut [u16; 2]) -> u32;
 
+#[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn LoadLibraryW(name: *const u16) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
 }
 
+/// XInput is Windows-only: elsewhere no pads are read this way.
+#[cfg(not(windows))]
+static XINPUT: LazyLock<Option<(GetState, SetState)>> = LazyLock::new(|| None);
+
+#[cfg(windows)]
 static XINPUT: LazyLock<Option<(GetState, SetState)>> = LazyLock::new(|| {
     for dll in ["xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"] {
         let w: Vec<u16> = dll.encode_utf16().chain([0]).collect();
@@ -641,6 +649,30 @@ extern "C" fn from_xbox_origin(_t: This, _handle: u64, x: i32) -> i32 {
 
 extern "C" fn translate_origin(_t: This, _kind: i32, o: i32) -> i32 {
     o
+}
+
+/// Struct results: hidden return pointer with MSVC; on macOS and Linux
+/// these small structs come back in registers.
+#[cfg(windows)]
+mod ret {
+    pub(super) use super::{analog_data, digital_data};
+}
+
+#[cfg(not(windows))]
+mod ret {
+    use super::This;
+    #[repr(C)]
+    pub struct Small<const N: usize>([u8; N]);
+    pub extern "C" fn digital_data(t: This, handle: u64, action: u64) -> Small<2> {
+        let mut v = Small([0; 2]);
+        super::digital_data(t, v.0.as_mut_ptr(), handle, action);
+        v
+    }
+    pub extern "C" fn analog_data(t: This, handle: u64, action: u64) -> Small<16> {
+        let mut v = Small([0; 16]);
+        super::analog_data(t, v.0.as_mut_ptr(), handle, action);
+        v
+    }
 }
 
 #[cfg(test)]
