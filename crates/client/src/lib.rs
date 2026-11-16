@@ -20,6 +20,7 @@ pub mod market;
 pub mod social;
 pub mod cloud;
 pub mod collections;
+pub mod friends_add;
 pub mod regions;
 pub mod a2s;
 pub mod game_ugc;
@@ -126,6 +127,12 @@ pub enum Command {
     SaveSteamCollections(Vec<model::CollectionEdit>),
     /// Comments on a profile (newest first), from `start`.
     LoadComments { steam_id: SteamId, start: u32 },
+    /// Your Quick Invite link; `new` makes another one.
+    LoadQuickInvite { new: bool },
+    /// Become friends through someone's Quick Invite link.
+    RedeemQuickInvite { steam_id: SteamId, token: String },
+    /// Profiles whose name matches (`page` starts at 1).
+    SearchUsers { text: String, page: u32 },
     /// Leave a comment on a profile.
     PostComment { steam_id: SteamId, text: String },
     /// Delete a comment (on your profile, or one you wrote).
@@ -281,6 +288,9 @@ pub enum Event {
     SteamCollectionsSaved(Result<(), String>),
     /// Comments on a profile, or why they can't be shown (private, turned off).
     Comments { steam_id: SteamId, result: Result<model::Comments, String> },
+    QuickInvite(Result<model::QuickInvite, String>),
+    QuickInviteRedeemed { steam_id: SteamId, result: Result<(), String> },
+    UserSearch(Result<model::UserSearch, String>),
     CommentPosted { steam_id: SteamId, result: Result<(), String> },
     ServerInfo { addr: String, result: Result<crate::a2s::ServerInfo, String> },
     Blocked { steam_id: SteamId, result: Result<bool, String> },
