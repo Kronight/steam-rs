@@ -85,6 +85,8 @@ pub struct Store {
     hidden: std::collections::BTreeSet<u32>,
     /// Mature pages the user chose to view this session.
     allowed: std::collections::HashSet<AppId>,
+    /// Open hidden games' pages without the warning ("Don't ask again").
+    never_ask: bool,
     search: Option<(String, Shared<Vec<Item>>)>,
     view: View,
     hero: usize,
@@ -129,6 +131,7 @@ pub struct Store {
 #[serde(default)]
 struct Saved {
     hidden: Vec<u32>,
+    never_ask: bool,
     itad_key: String,
     price_log: std::collections::BTreeMap<AppId, Vec<(u64, u64)>>,
 }
@@ -151,6 +154,7 @@ impl Store {
             ratings_busy: Default::default(),
             hidden: [3, 4].into_iter().collect(),
             allowed: Default::default(),
+            never_ask: false,
             filters: Default::default(),
             browse_page: 0,
             query: None,
@@ -371,7 +375,7 @@ impl Store {
     }
 
     /// Browse everything with one tag (clicked on a game page).
-    fn open_tag(&mut self, tag: u32) {
+    pub(super) fn open_tag(&mut self, tag: u32) {
         self.filters = store::query::Filters { tags: vec![tag], ..Default::default() };
         self.browse_page = 0;
         self.open(View::Browse);
@@ -573,6 +577,10 @@ impl Extension for Store {
                 }
             }
         }
+        let mut ask = !self.never_ask;
+        if w::check(ui, &t, &mut ask, w::text(t!("Warn me before opening a hidden game's page"), 14.0, t.text)).changed() {
+            self.never_ask = !ask;
+        }
         ui.add_space(14.0);
         ui.label(w::text_semibold(t!("Price history"), 15.0, t.text));
         ui.add(egui::Label::new(w::text(t!("Paste a free IsThereAnyDeal API key to see each game's price history and all-time low on its store page. Get one at isthereanydeal.com/apps/my."), 12.5, t.text_dim)).wrap());
@@ -593,12 +601,13 @@ impl Extension for Store {
     }
 
     fn save(&self) -> Option<String> {
-        serde_json::to_string(&Saved { hidden: self.hidden.iter().copied().collect(), itad_key: self.itad_key.clone(), price_log: self.price_log.clone() }).ok()
+        serde_json::to_string(&Saved { hidden: self.hidden.iter().copied().collect(), never_ask: self.never_ask, itad_key: self.itad_key.clone(), price_log: self.price_log.clone() }).ok()
     }
 
     fn load(&mut self, data: &str) {
         if let Ok(saved) = serde_json::from_str::<Saved>(data) {
             self.hidden = saved.hidden.into_iter().collect();
+            self.never_ask = saved.never_ask;
             self.itad_key = saved.itad_key;
             self.price_log = saved.price_log;
         } else if let Ok(h) = serde_json::from_str(data) {
@@ -1105,6 +1114,32 @@ impl Store {
 
             // Purchase box.
             let owned = ctx.state.apps.as_ref().is_some_and(|a| a.contains_key(&id)) || ctx.local.games.iter().any(|g| g.app_id == id);
+            // Like Steam: "Download <game> Demo" above buying it.
+            if let Some(demo) = d.demo.filter(|_| !owned) {
+                let have = ctx.state.apps.as_ref().is_some_and(|a| a.contains_key(&demo));
+                w::card(t).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(w::text_bold(t!("Download {name} Demo", name = d.name), 18.0, t.text));
+                            ui.label(w::text(t!("Try it for free before you buy."), 12.5, t.text_dim));
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if have {
+                                if w::button(ui, t, Some(icons::BOOKS), t!("In your library"), w::Kind::Play, w::Size::Md).clicked() {
+                                    ctx.navigate("library", Some(demo.to_string()));
+                                }
+                            } else if self.free_pending == Some(demo) {
+                                ui.add(egui::Spinner::new().color(t.accent));
+                            } else if w::button(ui, t, Some(icons::DOWNLOAD), t!("Download demo"), w::Kind::Play, w::Size::Md).clicked() {
+                                self.free_pending = Some(demo);
+                                ctx.send(client::Command::RequestFreeLicense { app_id: demo });
+                            }
+                        });
+                    });
+                });
+                ui.add_space(12.0);
+            }
             w::card(t).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -1572,14 +1607,6 @@ pub(crate) fn rating_bar(ui: &mut Ui, t: &Theme, positive: u32, count: u64) {
     });
 }
 
-fn review_color(t: &Theme, score: u32) -> Color32 {
-    match score {
-        7..=9 => Color32::from_rgb(0x66, 0xC0, 0xF4),
-        5..=6 => Color32::from_rgb(0xB9, 0xA0, 0x74),
-        _ => t.danger,
-    }
-}
-
 /// Icon for a store "feature" category (Co-op, Trading Cards, ...).
 fn feature_icon(name: &str) -> &'static str {
     let n = name.to_lowercase();
@@ -1617,6 +1644,9 @@ const DESCRIPTORS: &[(u32, &str)] = &[
 impl Store {
     /// True if the app's page should be gated by the user's content settings.
     fn details_mature(&mut self, id: AppId) -> bool {
+        if self.never_ask {
+            return false;
+        }
         match self.safe(id) {
             Some(ok) => !ok,
             // Until we know, use the details call if it has already answered.
@@ -1647,6 +1677,12 @@ impl Store {
                     }
                     if w::button(ui, t, None, t!("View page"), w::Kind::Secondary, w::Size::Md).clicked() {
                         self.allowed.insert(id);
+                    }
+                    if w::button(ui, t, None, t!("Don't ask again"), w::Kind::Ghost, w::Size::Md)
+                        .on_hover_text(t!("Open these pages without this warning. You can turn it back on in the store's settings."))
+                        .clicked()
+                    {
+                        self.never_ask = true;
                     }
                 });
             });
