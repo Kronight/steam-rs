@@ -114,7 +114,13 @@ fn top_bar(app: &mut SteamApp, ui: &mut Ui, t: &Theme, actions: &mut Vec<Action>
             notifications_button(app, ui, t, actions);
             let fr = w::icon_button(ui, t, icons::USERS, t!("Friends"), app.prefs.friends_open, unread);
             if fr.clicked() {
-                app.prefs.friends_open = !app.prefs.friends_open;
+                if app.prefs.page == "community" {
+                    // The side panel doesn't show here: go to the friends page
+                    // (out of an open chat).
+                    actions.push(Action::Navigate { page: "community".into(), arg: None });
+                } else {
+                    app.prefs.friends_open = !app.prefs.friends_open;
+                }
             }
             friends_hover(app, ui, t, &fr, actions);
             ui.add_space(8.0);
@@ -1034,10 +1040,9 @@ fn friend_row(app: &mut SteamApp, ui: &mut Ui, t: &Theme, p: &Persona, actions: 
                 }
                 ui.close();
             }
-            if ui.button(t!("Copy SteamID")).clicked() {
-                ui.ctx().copy_text(persona.steam_id.to_string());
-                ui.close();
-            }
+            ui.menu_button(t!("Copy SteamID"), |ui| {
+                crate::builtin::steam_id_menu(ui, &t, persona.steam_id);
+            });
             ui.separator();
             if ui.button(w::text(t!("Remove friend…"), 13.5, t.danger)).clicked() {
                 app.friend_dialog = Some((vp, FriendDialog::Remove { id: persona.steam_id, name: persona.display_name() }));

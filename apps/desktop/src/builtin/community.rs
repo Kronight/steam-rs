@@ -84,9 +84,9 @@ impl Extension for Community {
     }
 
     fn on_navigate(&mut self, _page: &str, arg: Option<&str>) {
-        if let Some(id) = arg.and_then(|a| a.parse().ok()) {
-            self.selected = Some(id);
-        }
+        // A friend opens their chat; nothing (the Friends button, "All
+        // friends") goes back to the friends page.
+        self.selected = arg.and_then(|a| a.parse().ok());
     }
 
     fn page(&mut self, _page: &str, ui: &mut Ui, ctx: &mut Ctx) {
@@ -141,9 +141,9 @@ impl Community {
                     }
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if w::icon_button(ui, t, icons::COPY, t!("Copy SteamID"), false, 0).clicked() {
-                        ui.ctx().copy_text(id.to_string());
-                        ctx.toast(t!("SteamID copied"));
+                    let r = w::icon_button(ui, t, icons::COPY, t!("Copy SteamID"), false, 0);
+                    if let Some(Some(what)) = egui::Popup::from_toggle_button_response(&r).show(|ui| super::steam_id_menu(ui, t, id)).map(|r| r.inner) {
+                        ctx.toast(t!("Copied: {what}", what = what));
                     }
                     if w::icon_button(ui, t, icons::X, t!("Close conversation"), false, 0).clicked() {
                         self.selected = None;

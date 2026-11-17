@@ -706,7 +706,121 @@ pub struct Badge {
     pub detail: String,
     /// e.g. "Unlocked Oct 14 @ 10:06am".
     pub unlocked: String,
+    /// When it was unlocked, as your clock showed it: seconds since 1970
+    /// read as UTC (0 if Steam's text couldn't be read).
+    pub unlocked_at: u64,
     pub url: String,
+    /// Game badges: hours played and card drops left, as Steam writes them
+    /// ("3,773 hrs on record", "3 card drops remaining").
+    pub playtime: String,
+    pub drops: String,
+}
+
+/// A trading card in a game badge's set.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BadgeCard {
+    pub name: String,
+    pub image: String,
+    /// How many you have (0 = missing).
+    pub owned: u32,
+    /// e.g. "3 of 8, Series 1".
+    pub position: String,
+}
+
+/// A badge's own page: the badge, and for a game badge its card set.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BadgeDetail {
+    /// e.g. "Dota 2 Badge".
+    pub title: String,
+    /// The level you have now (empty title if none yet).
+    pub current: Badge,
+    pub cards: Vec<BadgeCard>,
+    /// The game, for game badges.
+    pub app_id: Option<AppId>,
+}
+
+/// The ways a Steam account's id is written: (name, value). The names are
+/// the usual ones; "friend code" is the 32-bit account id Steam shows when
+/// adding friends.
+pub fn steam_id_formats(id: SteamId) -> [(&'static str, String); 5] {
+    let account = id & 0xFFFF_FFFF;
+    [
+        ("SteamID64", id.to_string()),
+        ("SteamID3", format!("[U:1:{account}]")),
+        ("SteamID", format!("STEAM_0:{}:{}", account & 1, account >> 1)),
+        ("friend_code", account.to_string()),
+        ("link", format!("https://steamcommunity.com/profiles/{id}")),
+    ]
+}
+
+/// Who can see a part of your profile: 1 only you, 2 friends, 3 everyone.
+/// Comments: 0 friends, 1 everyone, 2 nobody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProfilePrivacy {
+    pub profile: u8,
+    pub inventory: u8,
+    pub gifts: u8,
+    pub games: u8,
+    pub playtime: u8,
+    pub friends: u8,
+    pub comments: u8,
+}
+
+/// A profile item you own (background, frame...).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileItemChoice {
+    pub id: u64,
+    pub name: String,
+    pub image: String,
+    pub app_id: AppId,
+}
+
+/// Your profile as Steam's Edit Profile pages show it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProfileEdit {
+    pub persona_name: String,
+    pub real_name: String,
+    pub custom_url: String,
+    pub summary: String,
+    /// Location codes as Steam stores them (country "KZ", state, city id).
+    pub country: String,
+    pub state: String,
+    pub city: String,
+    /// "City, State, Country" as Steam names them.
+    pub location_text: String,
+    pub privacy: ProfilePrivacy,
+    pub hide_awards: bool,
+    pub theme: String,
+    /// (theme id, title)
+    pub themes: Vec<(String, String)>,
+    pub backgrounds: Vec<ProfileItemChoice>,
+    pub mini_backgrounds: Vec<ProfileItemChoice>,
+    pub frames: Vec<ProfileItemChoice>,
+    pub animated_avatars: Vec<ProfileItemChoice>,
+    /// Equipped item ids: background, mini profile background, frame,
+    /// animated avatar (0 = none).
+    pub equipped: [u64; 4],
+}
+
+/// Which part of the profile a save was for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileSave {
+    Info,
+    Privacy,
+    Avatar,
+    Item,
+    Theme,
+}
+
+/// Days since 1970-01-01 for a calendar date.
+pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1753,5 +1867,16 @@ mod os_tests {
         // Else its launch options; nothing known counts as yes.
         assert_eq!(app("", vec![launch("windows")]).runs_on_this_os(), THIS_OS == "windows");
         assert!(app("", vec![]).runs_on_this_os());
+    }
+}
+
+#[cfg(test)]
+mod steam_id_tests {
+    #[test]
+    fn writes_steam_ids_every_way() {
+        let f = super::steam_id_formats(76561197960287930);
+        assert_eq!(f[1].1, "[U:1:22202]");
+        assert_eq!(f[2].1, "STEAM_0:0:11101");
+        assert_eq!(f[3].1, "22202");
     }
 }
