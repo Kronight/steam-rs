@@ -5760,6 +5760,7 @@ dependencies = [
  "memmap2",
  "resvg",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
