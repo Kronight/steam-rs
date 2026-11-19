@@ -62,7 +62,7 @@ pub fn events(local: &local::LocalState) -> Vec<Event> {
         Event::Level(27),
         Event::Licenses { count: apps.len() },
         Event::Apps(apps),
-        Event::Friends((0..friends.len()).map(|i| (BASE + 100 + i as u64, Relationship::Friend)).collect()),
+        Event::Friends((0..friends.len()).map(|i| (BASE + 100 + i as u64, Relationship::Friend)).chain(friend_requests().iter().map(|(id, _, rel)| (*id, *rel))).collect()),
         Event::Personas(personas),
     ];
     events.push(Event::History {
@@ -75,13 +75,19 @@ pub fn events(local: &local::LocalState) -> Vec<Event> {
         real_name: "Demo Player".into(),
         summary: "Collector of indie gems and long co-op nights.".into(),
         location: "Earth".into(),
+        theme: "Midnight".into(),
+        background_full: true,
         member_since: Some(now - 9 * 31_536_000),
         ..Default::default()
     }));
     events.push(Event::Wallet { balance: 1234, currency: 1, pending: 250 });
     events.push(Event::Message(ChatMessage { friend: BASE + 101, from: BASE + 101, text: "gg! one more?".into(), time: now - 30, invite: None }));
+    events.extend(group_chat(me, ferris, now));
+    events.push(Event::Personas(friend_requests().iter().map(|(id, name, _)| Persona { steam_id: *id, name: (*name).into(), state: PersonaState::Online, ..Default::default() }).collect()));
     events.extend(inventory(me, now));
     events.extend(crate::builtin::hub::demo::events());
+    events.extend(crate::builtin::store::demo::events(now));
+    events.extend(crate::builtin::community_home::demo_events());
     events
 }
 
@@ -278,5 +284,109 @@ fn inventory(me: u64, now: u64) -> Vec<Event> {
             cat("Language", true, &["English", "Spanish", "French", "German", "Russian", "Italian", "Chinese", "Japanese", "Korean", "Polish", "Portuguese", "Vietnamese"]),
         ]),
     });
+    // Your profile settings and badges, for the profile pages (made up).
+    out.push(Event::ProfileEdit(Ok(model::ProfileEdit {
+        persona_name: "You".into(),
+        custom_url: "demo-player".into(),
+        summary: "Collector of indie gems and long co-op nights.".into(),
+        privacy: model::ProfilePrivacy { profile: 3, inventory: 3, gifts: 1, games: 3, playtime: 1, friends: 2, comments: 1 },
+        // Made-up items you own, with game art standing in for their pictures.
+        // As Steam sends them: ids with "#ProfileTheme_…" keys for titles.
+        themes: ["Summer", "Midnight", "Steel", "Cosmic", "DarkMode"].iter().map(|n| (n.to_string(), format!("#ProfileTheme_{n}"))).collect(),
+        theme: "Midnight".into(),
+        backgrounds: [(1145360, "Hades Underworld", "Hades"), (413150, "Pelican Town", "Stardew Valley"), (620, "Aperture Labs", "Portal 2"), (440, "Mann Co. Workshop", "Team Fortress 2"), (570, "Dire Ancient", "Dota 2")]
+            .iter()
+            .enumerate()
+            .map(|(i, (app, name, game))| model::ProfileItemChoice { id: 9100 + i as u64, name: (*name).into(), image: model::art::header(*app), large: model::art::hero(*app), app_id: *app, app_name: (*game).into(), ..Default::default() })
+            .collect(),
+        mini_backgrounds: [(1145360, "Elysium Fields", "Hades"), (413150, "Starry Farm", "Stardew Valley"), (730, "Dust II Dawn", "Counter-Strike 2")]
+            .iter()
+            .enumerate()
+            .map(|(i, (app, name, game))| model::ProfileItemChoice { id: 9200 + i as u64, name: (*name).into(), image: model::art::header(*app), large: model::art::hero(*app), app_id: *app, app_name: (*game).into(), ..Default::default() })
+            .collect(),
+        animated_avatars: [(413150, "Junimo Hop", "Stardew Valley"), (1145360, "Zagreus", "Hades"), (620, "Turret Blink", "Portal 2"), (440, "Heavy Grin", "Team Fortress 2"), (570, "Roshan Roar", "Dota 2"), (730, "Bomb Planted", "Counter-Strike 2"), (292030, "White Wolf", "The Witcher 3: Wild Hunt")]
+            .iter()
+            .enumerate()
+            .map(|(i, (app, name, game))| model::ProfileItemChoice { id: 9300 + i as u64, name: (*name).into(), image: model::art::capsule(*app), app_id: *app, app_name: (*game).into(), ..Default::default() })
+            .collect(),
+        equipped: [9100, 9200, 0, 0],
+        background_full: true,
+        favorite_badge: 2,
+        ..Default::default()
+    })));
+    let badge = |title: &str, detail: &str| model::Badge { title: title.into(), detail: detail.into(), ..Default::default() };
+    out.push(Event::Badges {
+        steam_id: 76561197960265728 + 1,
+        result: Ok(model::Badges {
+            level: 23,
+            xp: "2,410 XP".into(),
+            next: "90 XP to reach Level 24".into(),
+            progress: 0.6,
+            items: vec![
+                model::Badge { url: "https://steamcommunity.com/profiles/76561197960265729/badges/1".into(), ..badge("Years of Service", "300 XP") },
+                model::Badge { url: "https://steamcommunity.com/profiles/76561197960265729/badges/2".into(), ..badge("Community Leader", "100 XP") },
+                model::Badge { url: "https://steamcommunity.com/profiles/76561197960265729/badges/13".into(), ..badge("Pillar of Community", "100 XP") },
+            ],
+        }),
+    });
+    // Names for the wishlist's games (you don't own them).
+    out.push(Event::AppNames(vec![(1245620, "ELDEN RING".into()), (1086940, "Baldur's Gate 3".into()), (367520, "Hollow Knight".into()), (1145350, "Hades II".into()), (504230, "Celeste".into()), (1091500, "Cyberpunk 2077".into())]));
+    // Someone who isn't your friend (BASE + 300), for the profile's
+    // "Add Friend" and "More" buttons.
+    let stranger = 76561197960265728 + 300;
+    out.push(Event::Personas(vec![model::Persona { steam_id: stranger, name: "Lumen".into(), state: model::PersonaState::Online, ..Default::default() }]));
+    out.push(Event::Profile(model::ProfileInfo {
+        steam_id: stranger,
+        real_name: "Lumen Vale".into(),
+        summary: "Speedrunner. Mostly platformers.".into(),
+        theme: "Summer".into(),
+        location: "Somewhere".into(),
+        visibility: model::Visibility::Public,
+        ..Default::default()
+    }));
     out
+}
+
+/// A made-up group chat of friends, for the Friends & Chat window.
+fn group_chat(me: u64, ferris: u64, now: u64) -> Vec<Event> {
+    use model::{ChatGroup, ChatRoom, GroupMessage};
+    let (nova, quartz) = (ferris + 1, ferris + 3);
+    let group = 4_200_001;
+    let said = [(ferris, "who's in for Portal 2 co-op tonight?", 3600), (quartz, "me! after 9", 3400), (nova, "I'll join after this match", 3300), (me, "count me in", 1500), (ferris, "great, I'll set it up", 1200)];
+    let messages: Vec<GroupMessage> = said
+        .iter()
+        .enumerate()
+        .map(|(i, (from, text, ago))| GroupMessage { group, room: 1, sender: *from, text: (*text).into(), time: (now - ago) as u32, ordinal: i as u32 })
+        .collect();
+    let last = messages.last().cloned().unwrap_or_default();
+    vec![
+        Event::ChatGroups(Ok(vec![ChatGroup {
+            id: group,
+            name: "Co-op Night".into(),
+            default_room: 1,
+            active_members: 3,
+            rooms: vec![
+                ChatRoom { id: 1, name: "general".into(), last_message: last.text.clone(), last_time: last.time, last_sender: last.sender, unread: true, ..Default::default() },
+                ChatRoom { id: 2, name: "screenshots".into(), ..Default::default() },
+            ],
+            unread: true,
+            ..Default::default()
+        }])),
+        Event::ChatGroupMembers(vec![(group, vec![me, ferris, nova, quartz])]),
+        Event::GroupHistory { group, room: 1, result: Ok((messages, false)), older: false },
+    ]
+}
+
+/// Made-up friend invites (sent and received) and blocked people, with long
+/// names, for the Friends & Chat window's Invites and Blocked pages.
+fn friend_requests() -> [(u64, &'static str, Relationship); 6] {
+    const BASE: u64 = 76561197960265728;
+    [
+        (BASE + 200, "Maximilian_the_Extraordinarily_Long_Nickname", Relationship::RequestRecipient),
+        (BASE + 201, "Orbit", Relationship::RequestRecipient),
+        (BASE + 202, "Cobalt Wanderer of the Northern Servers", Relationship::RequestInitiator),
+        (BASE + 203, "Spammy McSpamface the Third", Relationship::Blocked),
+        (BASE + 204, "Grief", Relationship::Blocked),
+        (BASE + 205, "xX_NoScope_Xx", Relationship::Ignored),
+    ]
 }

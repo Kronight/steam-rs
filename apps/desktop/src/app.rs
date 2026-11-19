@@ -11,12 +11,19 @@ use ui::Theme;
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
+    /// The theme in use (from `skin`; not saved itself).
+    #[serde(skip)]
     pub theme: Theme,
+    /// Which theme the user picked, with their accent and roundness.
+    pub skin: ui::ThemeChoice,
+    /// The whole theme, as app versions before theme packages saved it:
+    /// read once to pick the matching theme package, never written.
+    #[serde(rename = "theme", skip_serializing)]
+    legacy_theme: ui::themes::LegacyTheme,
     pub zoom: f32,
     pub disabled: Vec<String>,
     pub ext_data: HashMap<String, String>,
     pub page: String,
-    pub friends_open: bool,
     pub overlay_enabled: bool,
     /// Account to sign in automatically at startup (cleared on log out).
     pub auto_login: Option<String>,
@@ -44,10 +51,57 @@ pub struct Prefs {
     pub bigpicture_scale: f32,
     /// Open in Big Picture at startup.
     pub bigpicture_start: bool,
-    /// Which version of the logo the tray icon shows.
+    /// Which version of the logo the taskbar button and tray icon show.
     pub tray_icon: ui::brand::Logo,
+    /// The one-time "try the new look" question has been answered (or
+    /// wasn't needed: a new install starts on the new look).
+    pub new_look_offered: bool,
     /// The in-game FPS counter's corner (or off).
     pub fps_corner: crate::builtin::settings::FpsCorner,
+}
+
+/// `--offscreen`: keep the window far off the screen (previews and
+/// screenshots of a test copy, which then never shows on the desktop).
+pub fn offscreen() -> bool {
+    std::env::args().any(|a| a == "--offscreen")
+}
+
+/// Where an `--offscreen` window sits: left of any monitor.
+pub const OFFSCREEN_POS: [f32; 2] = [-12000.0, 40.0];
+
+/// `--window-size=1920x1080`: the main window's size (previews).
+fn window_size_flag() -> Option<[f32; 2]> {
+    let v = std::env::args().find_map(|a| a.strip_prefix("--window-size=").map(String::from))?;
+    let (w, h) = v.split_once('x')?;
+    Some([w.parse().ok()?, h.parse().ok()?])
+}
+
+impl Prefs {
+    /// Pick the theme: the saved choice; or, for settings from before theme
+    /// packages, the package matching the saved theme; or the default.
+    /// A new install starts on the default theme. Someone who used the app
+    /// before themes keeps the look they had, and is asked once whether to
+    /// try the new one ([`Prefs::wants_new_look_offer`]).
+    pub fn settle_theme(&mut self) {
+        let old = std::mem::take(&mut self.legacy_theme);
+        if self.skin.id.is_empty() {
+            if old.is_set() {
+                self.skin = old.to_choice();
+            } else {
+                self.skin = ui::ThemeChoice { id: ui::themes::DEFAULT_ID.into(), ..Default::default() };
+                self.new_look_offered = true;
+            }
+        }
+        if self.skin.id == ui::themes::DEFAULT_ID {
+            self.new_look_offered = true;
+        }
+        self.theme = ui::themes::resolve(&self.skin);
+    }
+
+    /// Whether to ask "try the new look?": not asked yet, and on an older theme.
+    pub fn wants_new_look_offer(&self) -> bool {
+        !self.new_look_offered && self.skin.id != ui::themes::DEFAULT_ID
+    }
 }
 
 fn yes() -> bool {
@@ -58,11 +112,13 @@ impl Default for Prefs {
     fn default() -> Self {
         Self {
             theme: Theme::default(),
+            // Empty: filled in at startup (from older settings, or the default).
+            skin: ui::ThemeChoice::default(),
+            legacy_theme: Default::default(),
             zoom: 1.0,
             disabled: Vec::new(),
             ext_data: HashMap::new(),
             page: "library".into(),
-            friends_open: true,
             overlay_enabled: true,
             auto_login: None,
             language: None,
@@ -78,6 +134,7 @@ impl Default for Prefs {
             bigpicture_scale: 1.0,
             bigpicture_start: false,
             tray_icon: ui::brand::Logo::default(),
+            new_look_offered: false,
             fps_corner: Default::default(),
         }
     }
@@ -108,6 +165,8 @@ pub struct SteamApp {
     pub login: crate::login::LoginForm,
     pub toasts: Vec<Toast>,
     pub friend_filter: String,
+    /// `--friends=<what>`: what to open in the friends window once signed in.
+    pub pending_friends: Option<String>,
     /// An open friend dialog (nickname, server info, remove, block) and the
     /// window it belongs to.
     pub friend_dialog: Option<(egui::ViewportId, crate::shell::FriendDialog)>,
@@ -119,6 +178,10 @@ pub struct SteamApp {
     pub overlay: crate::overlay::Overlay,
     pub demo: bool,
     pub search_open: bool,
+    /// The result row the arrow keys are on in the app-wide search.
+    pub search_sel: Option<usize>,
+    /// Enter was pressed in the app-wide search: open the selected row.
+    pub search_pick: Option<()>,
     pub activate: Option<Activate>,
     /// Set by "Exit" so closing really quits instead of hiding to the tray.
     pub exiting: bool,
@@ -140,9 +203,16 @@ pub struct SteamApp {
     /// Main window is hidden in the tray.
     hidden: bool,
     applied_theme: Option<Theme>,
+    /// The look as last written to disk, and a change waiting to settle.
+    saved_look: Option<String>,
+    look_pending: Option<(String, f64)>,
+    /// `--new-look-prompt`: show the "try the new look" question (previews).
+    pub force_new_look_prompt: bool,
     applied_zoom: f32,
     /// Sharp window icons for the display's scaling (Windows).
     window_icon: crate::window_icon::WindowIcon,
+    /// The saved logo was handed to the tray and taskbar again after startup.
+    icons_refreshed: bool,
     /// Big Picture (fullscreen TV mode) and its controller input.
     pub bigpicture: crate::bigpicture::BigPicture,
     bigpicture_was_on: bool,
@@ -160,7 +230,16 @@ impl SteamApp {
     pub fn new(cc: &eframe::CreationContext<'_>, link: Option<String>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         ui::install_fonts(&cc.egui_ctx);
-        let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
+        // `--embed-windows` (with `--offscreen`): other windows (a game's
+        // Properties…) draw inside the main one, so a preview can capture them.
+        if offscreen() && std::env::args().any(|a| a == "--embed-windows") {
+            cc.egui_ctx.set_embed_viewports(true);
+        }
+        let mut prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
+        // The user's own themes (Settings → Appearance lists them).
+        ui::themes::set_user_dir(client::store::config_dir().join("themes"));
+        // Settings from before theme packages: the matching package.
+        prefs.settle_theme();
         // `--lang=en` / `--lang=ru` overrides the saved choice (screenshots, testing).
         let lang_flag = std::env::args().find_map(|a| a.strip_prefix("--lang=").map(String::from));
         // The language picked in setup counts until one is chosen in the app.
@@ -251,6 +330,7 @@ impl SteamApp {
             login: Default::default(),
             toasts: Vec::new(),
             friend_filter: String::new(),
+            pending_friends: None,
             friend_dialog: None,
             search: String::new(),
             back: Vec::new(),
@@ -259,6 +339,8 @@ impl SteamApp {
             overlay,
             demo,
             search_open: false,
+            search_sel: None,
+            search_pick: None,
             activate: None,
             exiting: false,
             cart_count: None,
@@ -273,8 +355,12 @@ impl SteamApp {
             pending_links: link.into_iter().collect(),
             hidden: false,
             applied_theme: None,
+            saved_look: None,
+            look_pending: None,
+            force_new_look_prompt: std::env::args().any(|a| a == "--new-look-prompt"),
             applied_zoom: 0.0,
             window_icon: Default::default(),
+            icons_refreshed: false,
             bigpicture,
             bigpicture_was_on: false,
             swipe: (egui::Vec2::ZERO, 0.0, false),
@@ -287,15 +373,36 @@ impl SteamApp {
         if let Some(page) = flag("page") {
             app.go(page, flag("arg"));
         }
+        // `--search=dota --search-select=0`: the app-wide search with that
+        // text and its results open, a row selected (previews).
+        if let Some(q) = flag("search") {
+            app.search = q;
+            app.search_open = true;
+            app.search_sel = flag("search-select").and_then(|n| n.parse().ok());
+        }
+        // `--theme=classic`: show a built-in theme (previews; not saved).
+        if let Some(theme) = flag("theme").and_then(|n| ui::themes::builtins().into_iter().find(|p| p.id.eq_ignore_ascii_case(&n) || p.name.eq_ignore_ascii_case(&n))) {
+            app.prefs.theme = theme;
+        }
+        // `--theme-dir <folder>`: try a theme package from a folder (for
+        // theme authors; not saved). A theme that can't be read falls back
+        // to the default, with the reason in the log.
+        let args: Vec<String> = std::env::args().collect();
+        let dir = args.iter().position(|a| a == "--theme-dir").and_then(|i| args.get(i + 1).cloned()).or_else(|| flag("theme-dir"));
+        if let Some(dir) = dir {
+            app.prefs.theme = ui::themes::load_dir_or_default(std::path::Path::new(&dir));
+        }
         app.login.signing_in = auto_account;
         // `--overlay` opens the Shift+Tab overlay right away (for previews).
-        // `--friends` opens the Friends & Chat window right away (for previews).
+        // `--friends` opens the Friends & Chat window right away (for
+        // previews); `--friends=<what>` opens it on a friends link's target
+        // (a SteamID, `group:<id>`, `add`, `invites`, `activity`…), and
+        // `--friends=chat` / `--friends=group` on the first conversation.
         if std::env::args().any(|a| a == "--friends") {
-            app.friends_window.open = true;
+            app.friends_window.raise();
         }
-        // `--friends-panel` starts with the friends list beside the page (checks).
-        if std::env::args().any(|a| a == "--friends-panel") {
-            app.prefs.friends_open = true;
+        if let Some(what) = flag("friends") {
+            app.pending_friends = Some(what);
         }
         // `--tray-menu` opens the tray menu near the screen corner (previews).
         if std::env::args().any(|a| a == "--tray-menu") {
@@ -320,7 +427,7 @@ impl SteamApp {
         while let Ok(e) = self.events.try_recv() {
             // Toast-worthy things are decided before state changes.
             if let Event::Message(m) = &e {
-                let open = self.prefs.page == "community" && self.current_arg.as_deref() == Some(&m.friend.to_string());
+                let open = self.friends_window.showing_chat(m.friend);
                 if m.from != self.state.steam_id && !open && self.prefs.toast_messages {
                     let name = self.state.persona(m.from).name;
                     self.toast(now, name, m.text.clone());
@@ -333,6 +440,10 @@ impl SteamApp {
                 }
             }
             crate::offline_ui::on_event(self, &e, now);
+            // What friends start doing, for the friends window's Activity tab.
+            if let Event::Personas(list) = &e {
+                self.friends_window.note_personas(&self.state, list);
+            }
             self.state.apply(&e);
             match &e {
                 Event::LoggedIn { account, .. } => {
@@ -410,7 +521,23 @@ impl SteamApp {
         self.registry.tick(env);
     }
 
-    pub fn navigate(&mut self, page: String, arg: Option<String>) {
+    pub fn navigate(&mut self, mut page: String, arg: Option<String>) {
+        // Friends and chat open in the Friends & Chat window, from any link
+        // ("friends", or the old friends page's "community" with a target).
+        if page == "friends" || (page == "community" && arg.is_some()) {
+            self.friends_window.route(arg.as_deref());
+            return;
+        }
+        // Plain "community" (the tray, plugins, older links) was the friends
+        // page: the Community home now when there is one, else the window.
+        if page == "community" && !self.registry.pages().iter().any(|p| p.id == "community") {
+            if self.registry.pages().iter().any(|p| p.id == "community_home") {
+                page = "community_home".into();
+            } else {
+                self.friends_window.route(None);
+                return;
+            }
+        }
         if page != self.prefs.page || arg != self.current_arg {
             self.back.push((self.prefs.page.clone(), self.current_arg.clone()));
             self.forward.clear();
@@ -479,9 +606,20 @@ impl SteamApp {
         let now = ctx.input(|i| i.time);
         for a in actions {
             match a {
+                // "activate" is the Activate a Product dialog, not a page (the library's bar opens it).
+                Action::Navigate { page, .. } if page == "activate" => self.activate = Some(Default::default()),
                 Action::Navigate { page, arg } => self.navigate(page, arg),
                 Action::Toast(text) => self.toast(now, text, ""),
-                Action::SetTheme(t) => self.prefs.theme = t,
+                Action::SetTheme(t) => {
+                    // A built-in theme with the user's changes: remember the
+                    // choice (the small radius follows the large one).
+                    if ui::themes::find(&t.id).is_some() {
+                        self.prefs.skin = ui::themes::choice_for(&t);
+                        self.prefs.theme = ui::themes::resolve(&self.prefs.skin);
+                    } else {
+                        self.prefs.theme = t;
+                    }
+                }
                 Action::SetZoom(z) => self.prefs.zoom = z.clamp(0.7, 2.0),
                 Action::SetEnabled { id, enabled } => {
                     self.registry.set_enabled(&id, enabled);
@@ -490,7 +628,7 @@ impl SteamApp {
                         self.prefs.disabled.push(id);
                     }
                 }
-                Action::OpenChat(id) => self.navigate("community".into(), Some(id.to_string())),
+                Action::OpenChat(id) => self.friends_window.show(crate::friends_window::Pane::Chat(id)),
                 Action::ReloadLocal => {
                     if let Ok(l) = local::load(Some(self.local.steam_root.clone())) {
                         self.local = l;
@@ -602,7 +740,7 @@ impl SteamApp {
                     self.show_window(ctx);
                     actions.push(Action::Navigate { page: page.into(), arg: None });
                 }
-                TrayCmd::Friends => self.friends_window.open = true,
+                TrayCmd::Friends => self.friends_window.raise(),
                 TrayCmd::Status(s) => self.client.send(Command::SetPersonaState(s)),
                 TrayCmd::Exit => {
                     self.show_window(ctx);
@@ -701,20 +839,67 @@ impl eframe::App for SteamApp {
         [0.0, 0.0, 0.0, 0.0]
     }
 
+    /// Previews of an `--offscreen` copy can't be pointed at with the real
+    /// mouse: `--pointer=x,y` keeps a pretend pointer there (hover states),
+    /// and `--click=x,y` clicks there once, 4 seconds in (or
+    /// `--click-after=<seconds>`).
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if !offscreen() || raw_input.viewport_id != egui::ViewportId::ROOT {
+            return;
+        }
+        let at = |name: &str| -> Option<egui::Pos2> {
+            let v = std::env::args().find_map(|a| a.strip_prefix(&format!("--{name}=")).map(String::from))?;
+            let (x, y) = v.split_once(',')?;
+            Some(egui::pos2(x.parse().ok()?, y.parse().ok()?))
+        };
+        let time = raw_input.time.unwrap_or(0.0);
+        raw_input.events.retain(|e| !matches!(e, egui::Event::PointerGone | egui::Event::PointerMoved(_)));
+        // Moved there once and then left still, so tooltips (which wait
+        // for the pointer to rest) show too.
+        if let Some(p) = at("pointer").filter(|p| ctx.input(|i| i.pointer.hover_pos()) != Some(*p)) {
+            raw_input.events.push(egui::Event::PointerMoved(p));
+        }
+        if let Some(p) = at("click") {
+            let done = ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("preview-clicked"))).unwrap_or(false);
+            let after = std::env::args().find_map(|a| a.strip_prefix("--click-after=").and_then(|v| v.parse::<f64>().ok())).unwrap_or(4.0);
+            if time > after && !done {
+                ctx.data_mut(|d| d.insert_temp(egui::Id::unique("preview-clicked"), true));
+                let modifiers = egui::Modifiers::NONE;
+                raw_input.events.push(egui::Event::PointerMoved(p));
+                raw_input.events.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers });
+                raw_input.events.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers });
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.save_look_now(&ui.ctx().clone(), frame);
         let ctx = ui.ctx().clone();
+        repaint_report(&ctx);
         // The running download (not a file check) on the taskbar / Dock.
         let shown = self.state.downloads.values().find(|d| !matches!(d.phase, model::DownloadPhase::Done | model::DownloadPhase::Failed) && !d.verifying()).map(|d| (d.fraction(), d.paused));
         self.taskbar.show(frame, shown);
-        self.window_icon.show(frame);
+        // Once a moment after startup, give the tray and the taskbar the saved
+        // logo again: right at startup Windows can keep showing the icon it
+        // had before.
+        if !self.icons_refreshed && ctx.input(|i| i.time) > 2.0 {
+            self.icons_refreshed = true;
+            self.tray.set_icon(self.prefs.tray_icon);
+            self.window_icon.refresh();
+        }
+        self.window_icon.show(frame, self.prefs.tray_icon);
         crate::image_cache::trim_decoded(&ctx);
         if self.applied_theme.as_ref() != Some(&self.prefs.theme) {
             self.prefs.theme.apply(&ctx);
             self.applied_theme = Some(self.prefs.theme.clone());
         }
-        if self.applied_zoom != self.prefs.zoom {
-            ctx.set_zoom_factor(self.prefs.zoom);
-            self.applied_zoom = self.prefs.zoom;
+        // The user's zoom times the theme's own size (a theme drawn large,
+        // like the redesign, shrinks itself to a comfortable size).
+        let zoom = self.prefs.zoom * self.prefs.theme.layout.scale.clamp(0.5, 2.0);
+        if self.applied_zoom != zoom {
+            ctx.set_zoom_factor(zoom);
+            self.applied_zoom = zoom;
         }
         // Update checks (not in demo/preview runs).
         if !self.demo {
@@ -797,8 +982,9 @@ impl eframe::App for SteamApp {
         self.bigpicture_was_on = big_picture;
         if self.window_mode != Some(mode) {
             self.window_mode = Some(mode);
+            let main_size = window_size_flag().unwrap_or([1440.0, 900.0]);
             let (size, min, resizable) = match mode {
-                WindowMode::Main => ([1440.0, 900.0], [1060.0, 680.0], true),
+                WindowMode::Main => (main_size, [1060.0, 680.0], true),
                 WindowMode::SignIn => ([720.0, 470.0], [720.0, 470.0], false),
                 WindowMode::Splash => ([380.0, 250.0], [380.0, 250.0], false),
             };
@@ -808,8 +994,11 @@ impl eframe::App for SteamApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(resizable));
             ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min.into()));
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.into()));
-            // Keep it centered on the screen, like Steam's windows.
-            if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
+            // Keep it centered on the screen, like Steam's windows (an
+            // off-screen preview stays where it is).
+            if offscreen() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(OFFSCREEN_POS.into()));
+            } else if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
                 let pos = ((monitor - egui::Vec2::from(size)) / 2.0).max(egui::Vec2::ZERO);
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos.to_pos2()));
             }
@@ -828,6 +1017,7 @@ impl eframe::App for SteamApp {
             crate::shell::show(self, ui, &mut actions);
             crate::shell::activate_dialog(self, &ctx);
             crate::shell::friend_dialogs(self, &ctx);
+            crate::shell::new_look_prompt(self, &ctx, &mut actions);
             crate::friends_window::show(self, &ctx, &mut actions);
             crate::overlay::show(self, &ctx, &mut actions);
             crate::launch_popup::show(self, &ctx);
@@ -852,6 +1042,7 @@ impl eframe::App for SteamApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.saved_look = Some(self.look_key());
         if self.demo {
             return;
         }
@@ -868,6 +1059,47 @@ impl eframe::App for SteamApp {
     }
 }
 
+impl SteamApp {
+    /// What the user picked about the app's look: the theme, their accent
+    /// colors and roundness, and the interface size.
+    fn look_key(&self) -> String {
+        format!("{:?}|{}|{}", self.prefs.skin, self.prefs.zoom, self.prefs.new_look_offered)
+    }
+
+    /// Save the settings right away once a change to the look settles
+    /// (half a second without further change, so dragging a color picker
+    /// doesn't write every frame). eframe's own save comes only every 30
+    /// seconds and on a normal exit, and a theme switch was lost when the
+    /// app was closed before that.
+    fn save_look_now(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let key = self.look_key();
+        let now = ctx.input(|i| i.time);
+        let Some(saved) = &self.saved_look else {
+            self.saved_look = Some(key);
+            return;
+        };
+        if *saved == key {
+            self.look_pending = None;
+            return;
+        }
+        match &self.look_pending {
+            Some((k, _)) if *k == key => {}
+            _ => self.look_pending = Some((key.clone(), now)),
+        }
+        let since = self.look_pending.as_ref().map(|p| p.1).unwrap_or(now);
+        if now - since < 0.5 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(550));
+            return;
+        }
+        if let Some(storage) = frame.storage_mut() {
+            eframe::App::save(self, storage);
+            storage.flush();
+        }
+        self.saved_look = Some(key);
+        self.look_pending = None;
+    }
+}
+
 /// Window size and style for each stage, like Steam's separate windows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum WindowMode {
@@ -875,4 +1107,103 @@ enum WindowMode {
     Splash,
     SignIn,
     Main,
+}
+
+#[cfg(test)]
+mod prefs_tests {
+    use super::Prefs;
+
+    impl Prefs {
+        fn clone_for_test(&self) -> Prefs {
+            ron::from_str(&ron::ser::to_string(self).unwrap()).unwrap()
+        }
+    }
+    use egui::Color32;
+
+    /// Settings saved before theme packages kept the whole theme; they load
+    /// as the matching theme package with the user's accent, and nothing
+    /// else is lost.
+    #[test]
+    fn settings_from_before_theme_packages_still_load() {
+        #[derive(serde::Serialize)]
+        struct OldTheme {
+            name: String,
+            dark: bool,
+            bg: Color32,
+            accent: Color32,
+            accent_2: Color32,
+            radius: u8,
+        }
+        #[derive(serde::Serialize)]
+        struct OldPrefs {
+            theme: OldTheme,
+            zoom: f32,
+            page: String,
+        }
+        let old = OldPrefs {
+            theme: OldTheme { name: "Aurora".into(), dark: true, bg: Color32::from_rgb(8, 17, 18), accent: Color32::from_rgb(200, 10, 10), accent_2: Color32::from_rgb(56, 189, 248), radius: 12 },
+            zoom: 1.25,
+            page: "store".into(),
+        };
+        let text = ron::ser::to_string(&old).unwrap();
+        let mut prefs: Prefs = ron::from_str(&text).unwrap();
+        assert_eq!(prefs.zoom, 1.25);
+        assert_eq!(prefs.page, "store");
+        let old = prefs.legacy_theme.clone();
+        assert!(old.is_set(), "the old theme is read");
+        let choice = old.to_choice();
+        assert_eq!(choice.id, "aurora");
+        assert_eq!(choice.accent, Some(Color32::from_rgb(200, 10, 10)));
+        // At startup: the look they had, and the new one is offered once.
+        prefs.settle_theme();
+        assert_eq!(prefs.theme.id, "aurora");
+        assert_eq!(prefs.theme.accent, Color32::from_rgb(200, 10, 10));
+        assert!(prefs.wants_new_look_offer());
+        // New users get the default theme, and aren't asked.
+        let mut fresh = Prefs::default();
+        fresh.settle_theme();
+        assert_eq!(fresh.theme.id, ui::themes::DEFAULT_ID);
+        assert!(!fresh.wants_new_look_offer());
+        // Settings saved after the question was answered don't ask again.
+        let mut answered = prefs.clone_for_test();
+        answered.new_look_offered = true;
+        let mut answered: Prefs = ron::from_str(&ron::ser::to_string(&answered).unwrap()).unwrap();
+        answered.settle_theme();
+        assert!(!answered.wants_new_look_offer());
+        assert_eq!(answered.theme.id, "aurora");
+        // A saved choice comes back as it was.
+        let back: Prefs = ron::from_str(&ron::ser::to_string(&prefs).unwrap()).unwrap();
+        assert_eq!(back.skin, prefs.skin);
+        // And new settings don't write the old theme back.
+        let again = ron::ser::to_string(&prefs).unwrap();
+        assert!(!again.contains("legacy"), "{again}");
+        assert!(again.contains("skin"));
+    }
+}
+
+/// `STEAMINRUST_REPAINT_LOG=1`: every 5 s, log how many frames the main
+/// window drew and what asked for them (file:line), to find what keeps an
+/// idle window busy.
+fn repaint_report(ctx: &egui::Context) {
+    use std::sync::Mutex;
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("STEAMINRUST_REPAINT_LOG").is_some()) {
+        return;
+    }
+    type Stats = (std::time::Instant, u32, HashMap<String, u32>);
+    static STATS: Mutex<Option<Stats>> = Mutex::new(None);
+    let mut g = STATS.lock().unwrap();
+    let (since, frames, causes) = g.get_or_insert_with(|| (std::time::Instant::now(), 0, HashMap::new()));
+    *frames += 1;
+    for c in ctx.repaint_causes() {
+        *causes.entry(format!("{}:{} {}", c.file, c.line, c.reason)).or_default() += 1;
+    }
+    if since.elapsed().as_secs_f32() >= 5.0 {
+        let mut top: Vec<_> = causes.drain().collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1));
+        top.truncate(8);
+        tracing::info!("repaints: {} frames in 5 s; causes: {:?}", frames, top);
+        *since = std::time::Instant::now();
+        *frames = 0;
+    }
 }
