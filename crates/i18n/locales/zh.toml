@@ -2510,6 +2510,11 @@
 "Bottom left" = "左下"
 "Bottom right" = "右下"
 
+# --- Wishlist order ---
+"Drag to change its place in your wishlist" = "拖动以更改它在愿望单中的位置"
+"Type a number to move it to that place" = "输入数字即可将它移到该位置"
+"Couldn't save your wishlist's order. Try again in a moment." = "无法保存愿望单的顺序。请稍后再试。"
+
 # --- Community: post a status ---
 "Post a status for your friends…" = "发布动态给你的好友…"
 "Tag with game" = "标记游戏"
