@@ -2529,3 +2529,12 @@
 "The status is empty" = "Запись пустая"
 "Sign in to post a status" = "Войдите, чтобы опубликовать запись"
 "Posting status updates is unavailable right now" = "Публикация записей сейчас недоступна"
+
+# --- Store search suggestions ---
+"See all results for “{q}”" = "Все результаты по запросу «{q}»"
+
+# --- Store filters ---
+"Clear ({n})" = "Сбросить ({n})"
+"Turn every filter off" = "Отключить все фильтры"
+"No filters are on" = "Фильтры не выбраны"
+"View|layout" = "Вид"
