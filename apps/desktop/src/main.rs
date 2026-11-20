@@ -13,6 +13,7 @@ mod ingame;
 mod launch_popup;
 mod launch_question;
 mod links;
+mod memlog;
 mod login;
 #[cfg(target_os = "macos")]
 mod mac_permissions;
@@ -20,6 +21,7 @@ mod offline_ui;
 mod overlay;
 mod shell;
 mod taskbar;
+mod texture_cache;
 mod tray;
 mod updater;
 mod window_icon;
