@@ -20,6 +20,7 @@ mod launch;
 pub mod market;
 pub mod trade;
 pub mod groupchat;
+pub mod chat;
 pub mod profile_edit;
 pub mod social;
 pub mod cloud;
@@ -43,6 +44,7 @@ mod pics;
 mod session;
 pub mod state;
 pub mod store;
+pub mod chat_admin;
 
 pub use auth::Guard;
 pub use launch::{LaunchArgs, LaunchMode, mode as launch_mode, mode_cached as launch_mode_cached, mode_peek as launch_mode_peek, safe_connect_args};
@@ -292,7 +294,37 @@ pub enum Command {
     CartRemove { line_item_id: u64 },
     /// Community pages: Workshop items, guides, discussions, hub, achievements.
     Hub(hub::Request),
+    /// Send a chat message written as Steam's markup (see
+    /// `model::chat::compose`); Steam turns slash commands into theirs.
+    SendChat { to: ChatTarget, text: String },
+    /// Add or take back a reaction (an emoticon or a sticker) under a message.
+    ReactToMessage { to: ChatTarget, time: u32, ordinal: u32, reaction: String, sticker: bool, add: bool },
+    /// Report a message to Steam's moderators (`reason`: Steam's
+    /// EContentReportReason).
+    ReportMessage { to: ChatTarget, from: SteamId, time: u32, ordinal: u32, reason: i32, text: String, language: String },
+    /// Your emoticons, stickers and chat effects.
+    LoadEmoticons,
+    /// Upload a picture and send it in a chat.
+    SendChatImage { to: ChatTarget, path: PathBuf },
+    /// Your trade offer link (`new`: make a new one; the old one stops working).
+    LoadTradeLink { new: bool },
+    /// Make a group chat with friends. With `partner`, it grows the
+    /// one-to-one chat with them into a group; an empty `name` makes an
+    /// unnamed one.
+    CreateChatGroup { name: String, partner: Option<SteamId>, invitees: Vec<SteamId> },
+    /// Invite a friend into a group chat.
+    InviteToChatGroup { group: u64, friend: SteamId },
+    LeaveChatGroup { group: u64 },
     LogOut,
+    /// Manage a group chat (`group` 0 for a new one): see [`model::chat_admin::AdminOp`].
+    ChatAdmin { group: u64, op: model::chat_admin::AdminOp },
+}
+
+/// A conversation: one-to-one with a friend, or a room of a group chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChatTarget {
+    Friend(SteamId),
+    Group { group: u64, room: u64 },
 }
 
 impl std::fmt::Debug for Command {
@@ -416,7 +448,17 @@ impl std::fmt::Debug for Command {
             Command::Hub(hub::Request::Reply { thread_url, .. }) => f.debug_struct("HubReply").field("thread_url", thread_url).finish_non_exhaustive(),
             Command::Hub(hub::Request::PostStatus { app_id, .. }) => f.debug_struct("HubPostStatus").field("app_id", app_id).finish_non_exhaustive(),
             Command::Hub(req) => f.debug_tuple("Hub").field(req).finish(),
+            Command::SendChat { to, .. } => f.debug_struct("SendChat").field("to", to).finish_non_exhaustive(),
+            Command::ReactToMessage { to, time, ordinal, reaction, sticker, add } => f.debug_struct("ReactToMessage").field("to", to).field("time", time).field("ordinal", ordinal).field("reaction", reaction).field("sticker", sticker).field("add", add).finish(),
+            Command::ReportMessage { to, from, time, ordinal, reason, .. } => f.debug_struct("ReportMessage").field("to", to).field("from", from).field("time", time).field("ordinal", ordinal).field("reason", reason).finish_non_exhaustive(),
+            Command::LoadEmoticons => f.write_str("LoadEmoticons"),
+            Command::SendChatImage { to, path } => f.debug_struct("SendChatImage").field("to", to).field("path", path).finish(),
+            Command::LoadTradeLink { new } => f.debug_struct("LoadTradeLink").field("new", new).finish(),
+            Command::CreateChatGroup { name, partner, invitees } => f.debug_struct("CreateChatGroup").field("name", name).field("partner", partner).field("invitees", invitees).finish(),
+            Command::InviteToChatGroup { group, friend } => f.debug_struct("InviteToChatGroup").field("group", group).field("friend", friend).finish(),
+            Command::LeaveChatGroup { group } => f.debug_struct("LeaveChatGroup").field("group", group).finish(),
             Command::LogOut => f.write_str("LogOut"),
+            Command::ChatAdmin { group, op } => f.debug_struct("ChatAdmin").field("group", group).field("op", op).finish(),
         }
     }
 }
@@ -611,6 +653,22 @@ pub enum Event {
     Error(String),
     /// Answer to a [`Command::Hub`] request.
     Hub(hub::Response),
+    /// Someone added (or took back) a reaction under a message.
+    MessageReaction { to: ChatTarget, time: u32, ordinal: u32, reactor: SteamId, reaction: String, sticker: bool, add: bool },
+    /// Your emoticons, stickers and chat effects.
+    Emoticons(model::Emoticons),
+    /// Your trade offer link, or why it couldn't be had.
+    TradeLink(Result<String, String>),
+    /// A picture was sent in a chat, or why not.
+    ChatImageSent { to: ChatTarget, result: Result<(), String> },
+    /// A message was reported, or why not.
+    MessageReported(Result<(), String>),
+    /// A group chat was made (its id), or why not.
+    ChatGroupCreated(Result<u64, String>),
+    /// Inviting into, or leaving, a group chat failed.
+    ChatGroupFailed(String),
+    /// What a [`Command::ChatAdmin`] came back with.
+    ChatAdmin(model::chat_admin::AdminEvent),
 }
 
 /// How the client is connected to Steam right now.
