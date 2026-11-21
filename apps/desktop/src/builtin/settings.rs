@@ -143,6 +143,7 @@ impl Extension for Settings {
             Some("ingame") => self.section = Section::Overlay,
             Some("wallet") => self.section = Section::Wallet,
             Some("notifications") => self.section = Section::Notifications,
+            Some("voice") => self.section = Section::Friends,
             Some(a @ ("history" | "licenses" | "account-details")) => {
                 self.section = if a == "account-details" { Section::Account } else { Section::Wallet };
                 self.acct.open(match a {
@@ -827,6 +828,7 @@ fn friends_chat(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
             ctx.navigate("settings", Some("privacy".into()));
         }
     });
+    super::friends::voice_settings(ui, t, ctx);
 }
 
 fn wallet(ui: &mut Ui, t: &Theme, ctx: &mut Ctx, pages: &mut super::settings_account::AccountPages) {
@@ -1061,6 +1063,9 @@ fn folders(ui: &mut Ui, t: &Theme, ctx: &mut Ctx) {
             if text_row(ui, t, &lib.display().to_string(), "", &info, t.text_dim, Some(t!("Open"))) {
                 local::open_folder(lib);
             }
+        }
+        if !ctx.local.games.is_empty() && w::button(ui, t, Some(icons::DRIVES), t!("Move games to another folder…"), w::Kind::Secondary, w::Size::Md).clicked() {
+            super::library::game_move::request_open(Vec::new());
         }
     });
 }

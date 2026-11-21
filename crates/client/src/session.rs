@@ -79,6 +79,11 @@ pub async fn run(mut cmds: Cmds, sink: Sink) {
                 store::remove(&account);
                 continue;
             }
+            // Signed out (the demo): a call is acted out.
+            Command::Voice(op) => {
+                crate::voice::offline(op, &sink);
+                continue;
+            }
             // Signed out (the demo): group chat changes just happen.
             Command::ChatAdmin { group, op } => {
                 crate::chat_admin::offline(group, op, 0, &sink);
@@ -410,6 +415,8 @@ struct Online {
     cache_saved: std::time::Instant,
     /// Games whose pending Steam Cloud upload is running.
     cloud_flushing: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<AppId>>>,
+    /// Voice chat: calls and channels.
+    voice: crate::voice::Voice,
     /// Library collections as last read from Steam.
     collections: crate::collections::Shared,
 }
@@ -521,6 +528,7 @@ async fn online(
         cache_dirty: false,
         cache_saved: std::time::Instant::now(),
         cloud_flushing: Default::default(),
+        voice: crate::voice::Voice::spawn(sink.clone()),
         collections: Default::default(),
         from_offline: false,
     };
@@ -663,6 +671,16 @@ async fn online(
                     st.launched_dirs.insert(app_id, install_dir);
                     let token = st.ipc.register(app_id);
                     sink(Event::GameAttached { app_id, env: st.ipc.env_value(&token) });
+                }
+                // No playing, updating or checking a game while its files move.
+                Some(Command::Launch { app_id, .. } | Command::LaunchWithoutCloud { app_id, .. }) if local::relocate::is_moving(app_id) => {
+                    sink(Event::StoreError("This game is being moved. Try again when that finishes.".into()));
+                }
+                Some(Command::Install(req)) if local::relocate::is_moving(req.app_id) => {
+                    sink(Event::StoreError("This game is being moved. Try again when that finishes.".into()));
+                }
+                Some(Command::VerifyGame { game, .. }) if local::relocate::is_moving(game.app_id) => {
+                    sink(Event::VerifyFinished { app_id: game.app_id, result: Err("This game is being moved. Try again when that finishes.".into()) });
                 }
                 // Like Steam: no playing while the game's files are changing.
                 Some(Command::Launch { app_id, .. }) if st.verifying.contains_key(&app_id) || st.active.as_ref().is_some_and(|(a, _)| *a == app_id) => {
@@ -1307,6 +1325,21 @@ async fn online(
                 }
                 Some(Command::LoadCart) => st.load_cart(sink),
                 Some(Command::CartAdd { package_id, gift, gift_to }) => st.cart_add(package_id, gift, gift_to, sink),
+                Some(Command::CartAddBundle { bundle_id, gift }) => st.cart_add_item(crate::store_user::bundle_cart_item(bundle_id, gift), format!("bundle {bundle_id}"), sink),
+                Some(Command::LoadStoreUser) => st.with_web(sink, move |web, sink| async move {
+                    let result = match web {
+                        Ok(w) => crate::store_user::load(&w).await,
+                        Err(e) => Err(e),
+                    };
+                    sink(Event::StoreUser(result));
+                }),
+                Some(Command::FollowCurator { clan, follow }) => st.with_web(sink, move |web, sink| async move {
+                    let result = match web {
+                        Ok(w) => crate::store_user::follow(&w, clan, follow).await,
+                        Err(e) => Err(e),
+                    };
+                    sink(Event::CuratorFollowed { clan, follow, result });
+                }),
                 Some(Command::CartModify { line_item_id, gift, gift_to }) => st.cart_modify(line_item_id, gift, gift_to, sink),
                 Some(Command::RequestFreeLicense { app_id }) => {
                     let (conn, sink) = (conn.clone(), sink.clone());
@@ -1325,6 +1358,12 @@ async fn online(
                     });
                 }
                 Some(Command::CartRemove { line_item_id }) => st.cart_remove(line_item_id, sink),
+                Some(Command::Screenshots(req)) => {
+                    let (conn, sink, me, cell) = (st.conn.clone(), sink.clone(), st.me, st.download_cell.unwrap_or(st.cell_id));
+                    tokio::spawn(async move {
+                        crate::screenshots::run(conn, me, cell, req, move |r| sink(Event::Screenshots(r))).await;
+                    });
+                }
                 Some(Command::Hub(req)) => {
                     let (conn, me) = (conn.clone(), st.me);
                     st.with_web(sink, move |web, sink| crate::hub::handle(conn, me, web, req, sink));
@@ -1444,6 +1483,8 @@ async fn online(
                         tokio::spawn(crate::chat_admin::run(conn, None, me, group, op, sink.clone()));
                     }
                 }
+                Some(Command::VoiceConnectionTest) => st.voice.connection_test(st.conn.clone(), sink.clone()),
+                Some(Command::Voice(op)) => st.voice.op(op),
                 Some(other) => tracing::debug!("ignored while signed in: {other:?}"),
             },
             Some(apps) = apps_rx.recv() => {
@@ -1948,6 +1989,8 @@ impl Online {
                         2 => sink(Event::Typing { from: n.steamid_friend() }),
                         _ => {}
                     }
+                } else if self.voice.route(&name, &p, |from| self.friends.get(&from) == Some(&Relationship::Friend) && !matches!(self.persona_state, PersonaState::Invisible | PersonaState::Busy)) {
+                    // Handed to the voice call.
                 } else {
                     sink(Event::Unhandled { emsg: p.emsg, name });
                 }
@@ -2324,16 +2367,21 @@ impl Online {
     }
 
     fn cart_add(&self, package_id: u32, gift: bool, gift_to: Option<SteamId>, sink: &Sink) {
+        use proto::webui::*;
+        let gift = gift || gift_to.is_some();
+        let item = CAccountCartAddItemsToCartRequestItemToAdd {
+            packageid: Some(package_id),
+            gift_info: gift_to.map(|id| CartGiftInfo { accountid_giftee: Some(model::account_id(id) as i32), ..Default::default() }),
+            flags: Some(AccountCartLineItemFlags { is_gift: Some(gift), is_private: None }),
+            ..Default::default()
+        };
+        self.cart_add_item(item, format!("package {package_id}"), sink);
+    }
+
+    fn cart_add_item(&self, item: proto::webui::CAccountCartAddItemsToCartRequestItemToAdd, what: String, sink: &Sink) {
         let (conn, sink, country) = (self.conn.clone(), sink.clone(), self.cart_country());
         tokio::spawn(async move {
             use proto::webui::*;
-            let gift = gift || gift_to.is_some();
-            let item = CAccountCartAddItemsToCartRequestItemToAdd {
-                packageid: Some(package_id),
-                gift_info: gift_to.map(|id| CartGiftInfo { accountid_giftee: Some(model::account_id(id) as i32), ..Default::default() }),
-                flags: Some(AccountCartLineItemFlags { is_gift: Some(gift), is_private: None }),
-                ..Default::default()
-            };
             let req = CAccountCartAddItemsToCartRequest { user_country: country, items: vec![item], ..Default::default() };
             match conn.call::<_, CAccountCartAddItemsToCartResponse>("AccountCart.AddItemsToCart#1", &req).await {
                 Ok(r) => {
@@ -2341,7 +2389,7 @@ impl Online {
                     // Steam can answer "OK" without adding anything: check.
                     let added = !r.line_item_ids.is_empty() && lines.iter().any(|l| r.line_item_ids.contains(&l.line_item_id));
                     if !added {
-                        tracing::warn!("cart: package {package_id} not added (line items {:?})", r.line_item_ids);
+                        tracing::warn!("cart: {what} not added (line items {:?})", r.line_item_ids);
                         sink(Event::StoreError("Steam didn't add it to your cart. It may not be sold in your region, or gifting it isn't allowed.".into()));
                     }
                     sink(Event::Cart(lines));
@@ -3329,6 +3377,7 @@ impl Online {
             self.save_cache();
         }
         self.conn = Connection::closed();
+        self.voice.disconnected();
         self.generation += 1;
         self.probing = false;
         self.from_offline = false;
@@ -3381,6 +3430,7 @@ impl Online {
     /// What a fresh connection needs: our status, the game we're in, level
     /// and notifications. Steam sends licenses, friends and personas itself.
     fn connected(&self, sink: &Sink) {
+        self.voice.set_connection(self.conn.clone(), self.me);
         let _ = set_persona(&self.conn, self.persona_state);
         if let Some(app) = self.playing {
             let _ = games_played(&self.conn, Some(app));
@@ -3603,6 +3653,7 @@ fn cart_lines(cart: Option<proto::webui::AccountCartContents>) -> Vec<model::Car
             .map(|l| model::CartLine {
                 line_item_id: l.line_item_id(),
                 package_id: l.packageid(),
+                bundle_id: l.bundleid(),
                 price: l.price_when_added.as_ref().map(|p| p.formatted_amount().to_string()).unwrap_or_default(),
                 gift_to: l.gift_info.as_ref().map(|g| g.accountid_giftee() as u32).filter(|a| *a != 0),
                 is_gift: l.flags.as_ref().is_some_and(|f| f.is_gift()) || l.gift_info.as_ref().is_some_and(|g| g.accountid_giftee() != 0),

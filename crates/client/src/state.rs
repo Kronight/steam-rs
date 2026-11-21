@@ -112,6 +112,11 @@ pub struct State {
     /// `None` until PICS has answered.
     pub apps: Option<BTreeMap<AppId, OwnedApp>>,
     pub friends: HashMap<SteamId, Relationship>,
+    /// Voice chat: the call you're in and who's ringing you.
+    pub voice: model::voice::VoiceState,
+    pub voice_settings: model::voice::VoiceSettings,
+    /// Microphones and speakers, once asked for.
+    pub voice_devices: Option<(Vec<model::voice::AudioDevice>, Vec<model::voice::AudioDevice>)>,
     /// Your groups and where you stand with each, from Steam's friends list.
     pub clans: HashMap<SteamId, crate::community_actions::ClanRelationship>,
     pub personas: HashMap<SteamId, Persona>,
@@ -473,7 +478,7 @@ impl State {
                 *self = State { last_error: Some(reason.clone()), ..Default::default() };
             }
             Event::Error(msg) => self.last_error = Some(msg.clone()),
-            Event::KeyActivated(_) | Event::WorkshopUnsubscribed { .. } | Event::StoreError(_) => {}
+            Event::KeyActivated(_) | Event::WorkshopUnsubscribed { .. } | Event::StoreError(_) | Event::StoreUser(_) | Event::CuratorFollowed { .. } => {}
             Event::WorkshopResults { .. } | Event::WorkshopSubscribed { .. } | Event::WorkshopSync { .. } | Event::FreeLicense { .. } => {}
             Event::Download(d) => {
                 self.set_aside.remove(&d.app_id);
@@ -569,7 +574,15 @@ impl State {
             Event::OfflinePlaytime(list) => self.offline_playtime = list.iter().map(|&(a, total, pending)| (a, (total, pending))).collect(),
             Event::CloudPending(list) => self.cloud_pending = list.iter().copied().collect(),
             Event::CloudSkipped { .. } => {}
+            Event::Screenshots(_) => {}
             Event::ChatAdmin(e) => crate::chat_admin::apply(self, e),
+            Event::VoiceConnectionTest(_) => {}
+            Event::Voice(e) => match e {
+                model::voice::VoiceEvent::State(v) => self.voice = v.clone(),
+                model::voice::VoiceEvent::Settings(s) => self.voice_settings = s.clone(),
+                model::voice::VoiceEvent::Devices { inputs, outputs } => self.voice_devices = Some((inputs.clone(), outputs.clone())),
+                model::voice::VoiceEvent::Ended(_) => {}
+            },
         }
     }
 

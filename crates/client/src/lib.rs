@@ -49,7 +49,10 @@ mod session;
 pub mod state;
 pub mod store;
 pub mod chat_admin;
+pub mod voice;
 pub mod economy;
+pub mod screenshots;
+pub mod store_user;
 
 pub use auth::Guard;
 pub use launch::{LaunchArgs, LaunchMode, mode as launch_mode, mode_cached as launch_mode_cached, mode_peek as launch_mode_peek, safe_connect_args};
@@ -305,12 +308,20 @@ pub enum Command {
     /// Add a copy to the cart: for this account, or as a gift (optionally
     /// already for a friend).
     CartAdd { package_id: u32, gift: bool, gift_to: Option<SteamId> },
+    /// Add a whole bundle to the cart.
+    CartAddBundle { bundle_id: u32, gift: bool },
+    /// Who you follow among curators, and exactly what you own.
+    LoadStoreUser,
+    /// Follow a curator, or stop following them.
+    FollowCurator { clan: u32, follow: bool },
     /// Switch a cart line between "For my account" and "This is a gift"
     /// (optionally for a friend), like the dropdown in Steam's cart.
     CartModify { line_item_id: u64, gift: bool, gift_to: Option<SteamId> },
     CartRemove { line_item_id: u64 },
     /// Community pages: Workshop items, guides, discussions, hub, achievements.
     Hub(hub::Request),
+    /// Your screenshots on Steam: list, upload, edit, delete.
+    Screenshots(screenshots::Request),
     /// Send a chat message written as Steam's markup (see
     /// `model::chat::compose`); Steam turns slash commands into theirs.
     SendChat { to: ChatTarget, text: String },
@@ -335,6 +346,11 @@ pub enum Command {
     LogOut,
     /// Manage a group chat (`group` 0 for a new one): see [`model::chat_admin::AdminOp`].
     ChatAdmin { group: u64, op: model::chat_admin::AdminOp },
+    /// Check that Valve's voice server accepts a connection. Rings nobody
+    /// and joins nothing.
+    VoiceConnectionTest,
+    /// Calls, channels, mute, volumes and audio settings.
+    Voice(model::voice::VoiceOp),
 }
 
 /// A conversation: one-to-one with a friend, or a room of a group chat.
@@ -467,10 +483,14 @@ impl std::fmt::Debug for Command {
             Command::CartAdd { package_id, gift, gift_to } => f.debug_struct("CartAdd").field("package_id", package_id).field("gift", gift).field("gift_to", gift_to).finish(),
             Command::CartModify { line_item_id, gift, gift_to } => f.debug_struct("CartModify").field("line_item_id", line_item_id).field("gift", gift).field("gift_to", gift_to).finish(),
             Command::CartRemove { line_item_id } => f.debug_struct("CartRemove").field("line_item_id", line_item_id).finish(),
+            Command::CartAddBundle { bundle_id, gift } => f.debug_struct("CartAddBundle").field("bundle_id", bundle_id).field("gift", gift).finish(),
+            Command::LoadStoreUser => f.write_str("LoadStoreUser"),
+            Command::FollowCurator { clan, follow } => f.debug_struct("FollowCurator").field("clan", clan).field("follow", follow).finish(),
             Command::Hub(hub::Request::Reply { thread_url, .. }) => f.debug_struct("HubReply").field("thread_url", thread_url).finish_non_exhaustive(),
             Command::Hub(hub::Request::NewTopic { key, .. }) => f.debug_struct("HubNewTopic").field("key", key).finish_non_exhaustive(),
             Command::Hub(hub::Request::PostStatus { app_id, .. }) => f.debug_struct("HubPostStatus").field("app_id", app_id).finish_non_exhaustive(),
             Command::Hub(req) => f.debug_tuple("Hub").field(req).finish(),
+            Command::Screenshots(_) => f.debug_struct("Screenshots").finish_non_exhaustive(),
             Command::SendChat { to, .. } => f.debug_struct("SendChat").field("to", to).finish_non_exhaustive(),
             Command::ReactToMessage { to, time, ordinal, reaction, sticker, add } => f.debug_struct("ReactToMessage").field("to", to).field("time", time).field("ordinal", ordinal).field("reaction", reaction).field("sticker", sticker).field("add", add).finish(),
             Command::ReportMessage { to, from, time, ordinal, reason, .. } => f.debug_struct("ReportMessage").field("to", to).field("from", from).field("time", time).field("ordinal", ordinal).field("reason", reason).finish_non_exhaustive(),
@@ -482,6 +502,8 @@ impl std::fmt::Debug for Command {
             Command::LeaveChatGroup { group } => f.debug_struct("LeaveChatGroup").field("group", group).finish(),
             Command::LogOut => f.write_str("LogOut"),
             Command::ChatAdmin { group, op } => f.debug_struct("ChatAdmin").field("group", group).field("op", op).finish(),
+            Command::VoiceConnectionTest => f.write_str("VoiceConnectionTest"),
+            Command::Voice(op) => f.debug_tuple("Voice").field(op).finish(),
         }
     }
 }
@@ -680,6 +702,9 @@ pub enum Event {
     PointsRedeemed { defid: u32, result: Result<u64, points::RedeemFail> },
     /// "Not interested" was set (or undone) for a game.
     AppIgnored { app_id: AppId, ignore: bool, result: Result<(), String> },
+    /// Who you follow among curators, and exactly what you own.
+    StoreUser(Result<store_user::StoreUser, String>),
+    CuratorFollowed { clan: u32, follow: bool, result: Result<(), String> },
     Cart(Vec<model::CartLine>),
     /// A store action failed (cart, wishlist).
     StoreError(String),
@@ -689,6 +714,8 @@ pub enum Event {
     Error(String),
     /// Answer to a [`Command::Hub`] request.
     Hub(hub::Response),
+    /// The answer to a [`Command::Screenshots`].
+    Screenshots(screenshots::Response),
     /// Someone added (or took back) a reaction under a message.
     MessageReaction { to: ChatTarget, time: u32, ordinal: u32, reactor: SteamId, reaction: String, sticker: bool, add: bool },
     /// Your emoticons, stickers and chat effects.
@@ -705,6 +732,9 @@ pub enum Event {
     ChatGroupFailed(String),
     /// What a [`Command::ChatAdmin`] came back with.
     ChatAdmin(model::chat_admin::AdminEvent),
+    /// What a [`Command::VoiceConnectionTest`] found.
+    VoiceConnectionTest(Result<voice::ConnectionTest, String>),
+    Voice(model::voice::VoiceEvent),
 }
 
 /// How the client is connected to Steam right now.

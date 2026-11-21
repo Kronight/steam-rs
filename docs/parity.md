@@ -15,7 +15,7 @@ Steam's website" still works; it just isn't native yet.
 | Library | 0.75 | Dynamic collections can be made and edited here, but saving them hasn't been tried on a real Steam account yet |
 | Downloads and installs | 1 | |
 | Store | 1 | Checkout happens on Steam's website (Steam requires it) |
-| Friends and chat | 0.75 | No voice chat; no polls in group chats |
+| Friends and chat | 0.75 | Voice chat is built but hasn't been tried in a real call; no polls in group chats |
 | Community | 0.75 | No Showcase Manager. New discussions, joining, leaving and group invites are in the app but haven't been tried on a real account |
 | Inventory and Market | 0.75 | Buying, buy orders, gems, booster packs and pending gifts are in the app but haven't been tried on a real account |
 | Steam Cloud | 1 | |
@@ -74,6 +74,7 @@ Steam's website" still works; it just isn't native yet.
 | Install states everywhere: list row with progress, game page, right-click menu, Properties | Done |
 | Properties: general, launch options, language, updates, installed files, versions and betas (with private beta codes), DLC, Steam Cloud, Workshop, controller, privacy | Done |
 | Verify files, uninstall, desktop shortcuts, browse local files (also while installing) | Done. Uninstalling also removes the game's Workshop items and unused download manifests, like Steam |
+| Move a game to another library folder (Properties → Installed files, the game's Manage menu, Settings → Storage): several games at once, space needed and free, progress with Cancel | Done. Files are copied, checked by hash, and the originals deleted only after the switch; a move cut off by a crash is finished or undone at the next start. Workshop items, the Proton prefix and shader cache move too. Tested only on made-up libraries in a temp folder, never on a real game, a second physical drive, or with Steam's own app open (it may need a restart to see the new location). Moving within one drive still copies, so it needs the free space |
 | Achievements with rarity, sorting and comparing with a friend | Done |
 
 ## Downloads and installs
@@ -108,6 +109,8 @@ All native, no web view.
 | Prices in your wallet's currency, "In library" marks | Done |
 | Cart (the same cart as the website), Steam's "Added to your cart" popup, discount price tags, product keys, wallet balance | Done. Each copy is for your account or a gift to a friend you pick, then one Checkout button |
 | Points Shop: your points, items by category (avatars, frames, backgrounds, mini-profile backgrounds, stickers, chat effects, emoticons…) and items from your games. Get items with your points in the app: a large preview (items that move play), whether you own it, a confirmation with the item and its cost, Steam's errors in plain words, then an offer to wear it (avatar, frame, background, mini-profile) | Done, with Steam's own `LoyaltyRewards` calls. **Redeeming was not tried live**: no points were spent on a real account, so it's covered by unit tests and the demo account only; reading the real balance and owned items wasn't tried live either. Bundles and seasonal badges still open Steam's website. Videos in H.265 (every startup movie checked and a few backgrounds) can't play in the app: the item's window says so and links to Steam's page |
+| Bundle and package pages: what's included, what you already own, the bundle discount, "Complete your collection" and add to cart. Game pages list their bundles and editions, and Steam's bundle, package and curator links open in the app | Done. **Adding to a real cart wasn't tried live**: it's covered by unit tests and the demo account. The "Complete your collection" price is worked out with Steam's rounding and marked as approximate, because Steam's cart sets the final price |
+| Curators: the ones you follow, the most followed, a curator's page with its reviews, follow and unfollow, and "Recommended by curators you follow" on game pages | Done. **Following and unfollowing weren't tried live**, and neither was reading a real account's follows: they're covered by unit tests and the demo account |
 | Discovery feed: the queue as a feed, "New picks" for a fresh queue | Done. "New picks" wasn't tested on a real account |
 | Search suggestions while you type (picture, name, price), with the arrow keys and Enter | Done |
 | Wishlist in your order: drag games by the handle or type a place, saved to Steam, when sorted by "Your rank" | Done. Saving wasn't tested on a real wishlist |
@@ -130,8 +133,8 @@ All native, no web view.
 | Group chats: your groups with unread marks, rooms, history, sending, live messages, who's online in a members list | Done, in the app. Polls aren't there yet |
 | Chat like Steam's: Steam emoticons and emoji with a picker (recent, emoticons, stickers, effects, search), slash commands (`/me`, `/code`, `/pre`, `/quote`, `/spoiler`, `/random`, `/flip`, `/store`), reactions, a menu on each message (copy, select, react, quote, report), cards for Store, Workshop and community links, pictures shown in the chat and opened large | Done |
 | Sending more than text: a picture, your latest screenshot, your trade offer link; inviting a friend into the conversation | Done. These weren't tried on a real account |
-| Group chat management, like Steam's: notifications per group and per channel, invite links and inviting friends, the settings window (name, tagline, icon, channels, roles and what they allow, invite links, invited accounts, bans, leave), a member's right-click Manage menu (roles, make admin, kick, ban), making and deleting group chats | Done. Everything you're not allowed to do is greyed out with the reason. Voice channels are listed but can't be joined |
-| Voice chat | Not yet |
+| Group chat management, like Steam's: notifications per group and per channel, invite links and inviting friends, the settings window (name, tagline, icon, channels, roles and what they allow, invite links, invited accounts, bans, leave), a member's right-click Manage menu (roles, make admin, kick, ban), making and deleting group chats | Done. Everything you're not allowed to do is greyed out with the reason. Voice channels can be made and joined |
+| Voice chat: one-to-one calls and group voice channels with join, leave, answer, decline, mute, deafen, who's talking, volume per person, microphone and speaker choice, and push-to-talk | Built, **not yet proven in a real call**. Proven live: Valve's voice server accepts our encrypted connection and Steam confirms it (nobody was called, no channel joined, no audio sent). Proven only with stand-ins: sending, receiving and mixing voice. Not tried: a real microphone or speakers, a call with someone on the official client, a real voice channel, and macOS audio |
 
 ## Community
 
@@ -143,6 +146,7 @@ All native, no web view.
 | On someone's profile: Add friend (or accept, cancel, remove), Message, and a More menu (copy the link, view on Steam, inventory, remove friend, block, report on Steam) | Done. Adding, removing and blocking weren't tested on a real account |
 | Edit your profile: General, Avatar (animated avatars and frames), Profile background (full screen or original size), Mini profile, Theme, Featured badge, and Steam's full Privacy page with its checkboxes | Done, with a preview before saving. The Showcase Manager isn't there yet. Saving wasn't tested on a real account |
 | Someone's games, inventory, screenshots, artwork, videos, Workshop items and guides | Done |
+| Screenshot manager (View menu, a game's page, the in-game "Screenshot saved" notice): your screenshots per game, on this PC and uploaded, a large viewer, caption, spoiler tag, visibility, upload, delete from this PC or from Steam (always asked first), show on disk, copy | Done, tested on made-up screenshots with the demo account. **Never run against Steam:** the uploaded list, uploading, changing an uploaded screenshot and deleting from Steam, so no real screenshot was touched. They follow Steam's published message formats. Also not tried: clicking the notice in a real game, a real `screenshots.vdf`, and Steam's own app being open (it may overwrite captions edited here). Non-Steam games' screenshots can't be uploaded |
 | Community hub per game: screenshots, artwork, videos, news | Done |
 | Watching broadcasts | Native page with the app's own player. Opens from Community → Broadcasts, a game's hub, a "live now" strip on store pages, a friend's "Watch game" and broadcast links. Quality (or automatic), volume, full screen, pause and "Back to live", title, broadcaster, game, viewer count, and the chat beside it (read-only: you can't post). Played with public broadcasts on Windows. Not tried yet: a Mac, and friends-only or private broadcasts. Steam gives one answer for ended, private and friends-only, so the app says it may be any of them |
 | Workshop item pages: media, description, required items, change notes, comments; subscribe, rate, favorite | Done. Rating and favoriting weren't tested on a real account |
@@ -200,7 +204,7 @@ Details: [steam-compatibility.md](steam-compatibility.md).
 | Workshop (`ISteamUGC`): queries, subscriptions, votes, favorites, downloads | Done. Publishing items isn't supported |
 | Inventory (`ISteamInventory`): items, drops, promos, crafting, properties | Done, including item definitions (through the web session when Steam won't give them to the game's session). No purchases |
 | Server browser (`ISteamMatchmakingServers`): internet and LAN lists, ping, players, rules | Done |
-| Screenshots (`ISteamScreenshots`) into the Steam screenshot folder | Done. Not uploaded |
+| Screenshots (`ISteamScreenshots`) into the Steam screenshot folder | Done. Uploading them is in the screenshot manager (see Community) |
 | Steam Input on Xbox-style pads with the game's bindings | Done on Windows. No gyro, trackpads or binding panel; no controllers in games on a Mac yet |
 | Hosting game servers (`ISteamGameServer`, `ISteamGameServerStats`), listen and dedicated | Partly. Tested on Spacewar through Valve's `steam_api`: anonymous sign-in, listed in Steam's server browser, answering server queries, Steam checking a player's ticket, reading a player's stats, and two game servers connecting over networking sockets and messages. Not proven: signing in with a real login token, saving stats, a player connecting to a server over networking sockets |
 
